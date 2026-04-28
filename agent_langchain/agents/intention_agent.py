@@ -511,6 +511,29 @@ Priority 3:
                 ],
             }
 
+        if any(word in query for word in ("火车", "高铁", "动车", "城际", "车次", "12306", "余票", "票价", "火车票", "高铁票")):
+            return {
+                "reasoning": "用户询问火车/高铁车次、时间、票价或余票，直接调度信息检索智能体使用 12306 MCP。",
+                "intents": [
+                    {
+                        "type": "search",
+                        "confidence": 1.0,
+                        "description": "火车车次查询",
+                        "reason": "用户明确询问铁路出行信息。",
+                    }
+                ],
+                "key_entities": {},
+                "rewritten_query": query,
+                "agent_schedule": [
+                    {
+                        "agent_name": "search",
+                        "priority": 1,
+                        "reason": "调用 12306 MCP 查询车次、时间、票价或余票",
+                        "expected_output": "铁路车次时间、余票与票价信息",
+                    }
+                ],
+            }
+
         if any(word in query for word in ("天气", "气温", "下雨", "预报")):
             return {
                 "reasoning": "用户询问天气，直接调度信息检索智能体使用高德 MCP maps_weather。",

@@ -82,6 +82,17 @@ TravelFlow 对外采用 5 个智能体角色：1 个主智能体和 4 个业务�
 
 配置 `AMAP_MAPS_API_KEY` 或 `AMAP_API_KEY` 环境变量即可替换默认 Key。
 
+## 12306 MCP 能力
+
+`utils/train_service.py` 通过 `npx -y 12306-mcp` 调用 12306 MCP 的 `get-tickets` 工具，用于火车/高铁车次查询。
+用户询问火车、高铁、动车、车次、票价或余票时，`IntentRecognition` 会调度 `search` 智能体优先走 12306 MCP，返回车次、出发/到达站、出发/到达时间、历时、余票和票价等结构化结果。
+运行该能力需要本机可用的 Node.js / npm / npx。
+
+可选环境变量：
+
+- `TRAIN_MCP_COMMAND`
+- `TRAIN_MCP_ARGS`
+
 ## 流式响应与过程可视化
 
 FastAPI 提供两个聊天接口：

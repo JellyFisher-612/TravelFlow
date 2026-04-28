@@ -14,7 +14,8 @@ description: TravelFlow Search Agent skill. Use it when the system needs externa
 3. 高德地理编码：地址转经纬度。
 4. 高德逆地理编码：经纬度转地址。
 5. 高德路径规划：支持步行、驾车、公交路线。
-6. 通用文本搜索兜底：当问题不是结构化旅游数据时使用。
+6. 12306 MCP 火车/高铁查询：查询车次、出发到达时间、余票和票价等铁路出行信息。
+7. 通用文本搜索兜底：当问题不是结构化旅游数据时使用。
 
 ## 输入
 
@@ -45,6 +46,7 @@ description: TravelFlow Search Agent skill. Use it when the system needs externa
 - `results.pois`
 - `results.routes`
 - `results.weather`
+- `results.tickets`
 - `results.summary`
 
 ## 规划约束

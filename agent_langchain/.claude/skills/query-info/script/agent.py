@@ -3,6 +3,8 @@
 优先使用高德开放平台 API 提供 POI、天气、地理编码和路径规划能力；
 通用文本查询保留 DDGS 作为兜底搜索。
 """
+from __future__ import annotations
+
 from typing import Optional, Union, List, Dict, Any
 import asyncio
 import importlib
@@ -11,6 +13,7 @@ import logging
 import re
 import sys
 import os
+from datetime import date, timedelta
 
 # Add project root to sys.path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../..")))
@@ -21,6 +24,7 @@ from utils.structured_output_guard import (
 )
 from utils.amap_service import AmapService
 from utils.langchain_runtime import ainvoke_text
+from utils.train_service import TrainService
 
 logger = logging.getLogger(__name__)
 
@@ -144,6 +148,18 @@ class InformationQueryAgent:
         event_data = context.get("event_data") or None
         refinement_requests = context.get("plan_search_requests") or []
 
+        if self._is_train_query(user_query, event_data):
+            logger.info("Train query: %s", user_query)
+            try:
+                return await self._train_query(user_query, event_data)
+            except Exception as e:
+                logger.warning("12306 MCP train query failed: %s", e)
+                return {
+                    "query_type": "火车车次查询",
+                    "query_success": False,
+                    "results": {"message": f"12306 MCP 查询失败: {e}"},
+                }
+
         # ---------- 行程规划场景：基于事件信息调用高德 API ----------
         if isinstance(event_data, dict):
             if event_data.get("destination"):
@@ -205,6 +221,208 @@ class InformationQueryAgent:
         if not q:
             return False
         return "天气" in q or "气温" in q or "下雨" in q or "预报" in q
+
+    def _is_train_query(self, query: str, event_data: Any = None) -> bool:
+        """判断是否为 12306 车次/票价/余票类问题。"""
+        q = (query or "").strip()
+        train_words = ("火车", "高铁", "动车", "城际", "车次", "12306", "余票", "票价", "火车票", "高铁票")
+        if any(word in q for word in train_words):
+            return True
+        if isinstance(event_data, dict):
+            transport = str(event_data.get("transportation") or event_data.get("transportation_preference") or "")
+            return any(word in transport for word in train_words)
+        return False
+
+    async def _train_query(self, query: str, event_data: Any = None) -> Dict[str, Any]:
+        params = self._extract_train_query_params(query, event_data)
+        missing = [key for key in ("from_station", "to_station", "date") if not params.get(key)]
+        if missing:
+            return {
+                "query_type": "火车车次查询",
+                "query_success": False,
+                "results": {
+                    "message": "查询高铁/火车车次需要出发地、目的地和日期。你可以这样问：明天上海虹桥到杭州东的高铁有哪些？",
+                    "missing_info": missing,
+                    "parsed_params": params,
+                },
+            }
+
+        train_filter_flags = self._train_filter_flags(query)
+        sort_flag = self._train_sort_flag(query)
+        service = TrainService()
+        raw = await service.get_tickets(
+            date=params["date"],
+            from_station=params["from_station"],
+            to_station=params["to_station"],
+            train_filter_flags=train_filter_flags,
+            sort_flag=sort_flag,
+            sort_reverse=False,
+            limited_num=10,
+        )
+        tickets = self._normalize_train_tickets(raw)
+        summary = self._format_train_ticket_summary(params, tickets, raw)
+        return {
+            "query_type": "火车车次查询",
+            "query_success": True,
+            "verified": True,
+            "requires_official_source": True,
+            "trust_level": "high",
+            "results": {
+                "summary": summary,
+                "tickets": tickets,
+                "raw": raw,
+                "parsed_params": params,
+                "sources": [
+                    {
+                        "title": "12306 MCP get-tickets",
+                        "url": "https://github.com/Joooook/12306-mcp",
+                        "source_type": "official_transport",
+                        "trust_level": "high",
+                        "official": True,
+                    }
+                ],
+            },
+        }
+
+    def _extract_train_query_params(self, query: str, event_data: Any = None) -> Dict[str, str]:
+        q = (query or "").strip()
+        station_query = self._strip_train_date_words(q)
+        params = {
+            "from_station": "",
+            "to_station": "",
+            "date": self._extract_train_date(q),
+        }
+        if isinstance(event_data, dict):
+            params["from_station"] = str(event_data.get("origin") or "").strip()
+            params["to_station"] = str(event_data.get("destination") or "").strip()
+            params["date"] = str(event_data.get("start_date") or params["date"] or "").strip()
+
+        station_match = re.search(
+            r"(?:从)?(?P<from>[\u4e00-\u9fa5A-Za-z0-9]+?)(?:站)?(?:出发)?(?:到|去|至|前往)(?P<to>[\u4e00-\u9fa5A-Za-z0-9]+?)(?:站)?(?:的|高铁|动车|火车|车次|票|$)",
+            station_query,
+        )
+        if station_match:
+            params["from_station"] = self._clean_station_name(station_match.group("from"))
+            params["to_station"] = self._clean_station_name(station_match.group("to"))
+
+        return params
+
+    def _strip_train_date_words(self, query: str) -> str:
+        cleaned = re.sub(r"20\d{2}[-/.年]\d{1,2}[-/.月]\d{1,2}日?", "", query or "")
+        cleaned = re.sub(r"\d{1,2}月\d{1,2}日?", "", cleaned)
+        cleaned = re.sub(r"(今天|明天|后天|上午|下午|晚上|早上|中午)", "", cleaned)
+        return cleaned.strip()
+
+    def _extract_train_date(self, query: str) -> str:
+        q = query or ""
+        today = date.today()
+        if "后天" in q:
+            return (today + timedelta(days=2)).isoformat()
+        if "明天" in q:
+            return (today + timedelta(days=1)).isoformat()
+        if "今天" in q:
+            return today.isoformat()
+
+        match = re.search(r"(20\d{2})[-/.年](\d{1,2})[-/.月](\d{1,2})日?", q)
+        if match:
+            y, m, d = [int(part) for part in match.groups()]
+            return date(y, m, d).isoformat()
+
+        match = re.search(r"(\d{1,2})月(\d{1,2})日?", q)
+        if match:
+            m, d = [int(part) for part in match.groups()]
+            candidate = date(today.year, m, d)
+            if candidate < today:
+                candidate = date(today.year + 1, m, d)
+            return candidate.isoformat()
+        return ""
+
+    def _clean_station_name(self, value: str) -> str:
+        cleaned = re.sub(r"(查询|查|帮我|请问|有没有|哪些|什么|多少|票价|余票|时间|时刻表)", "", value or "")
+        return cleaned.strip(" 的，,。？?：:")
+
+    def _train_filter_flags(self, query: str) -> str:
+        flags = []
+        q = query or ""
+        if "高铁" in q or "G字头" in q:
+            flags.append("G")
+        if "动车" in q or "D字头" in q:
+            flags.append("D")
+        if "城际" in q or "C字头" in q:
+            flags.append("C")
+        return "".join(flags)
+
+    def _train_sort_flag(self, query: str) -> str:
+        q = query or ""
+        if any(word in q for word in ("最快", "耗时最短", "时间最短")):
+            return "duration"
+        if any(word in q for word in ("最早", "早上", "上午")):
+            return "startTime"
+        if any(word in q for word in ("最便宜", "便宜", "价格")):
+            return "price"
+        return ""
+
+    def _normalize_train_tickets(self, raw: Any) -> List[Dict[str, Any]]:
+        candidates = raw
+        if isinstance(raw, dict):
+            candidates = raw.get("tickets") or raw.get("data") or raw.get("results") or raw.get("list") or []
+        if isinstance(candidates, dict):
+            candidates = candidates.get("tickets") or candidates.get("list") or []
+        if not isinstance(candidates, list):
+            return []
+        return [item for item in candidates if isinstance(item, dict)]
+
+    def _format_train_ticket_summary(self, params: Dict[str, str], tickets: List[Dict[str, Any]], raw: Any) -> str:
+        route = f"{params.get('date')} {params.get('from_station')} → {params.get('to_station')}"
+        if not tickets:
+            if isinstance(raw, str) and raw.strip():
+                return f"12306 查询结果：{raw.strip()}"
+            return f"没有查到 {route} 的可用车次。"
+
+        lines = [f"12306 查询到 {route} 的车次如下（最多显示前 10 条）："]
+        for ticket in tickets[:10]:
+            train_no = self._pick_ticket_value(ticket, "train_code", "trainNo", "station_train_code", "车次") or "未知车次"
+            from_station = self._pick_ticket_value(ticket, "from_station", "fromStation", "from_station_name", "出发站") or params.get("from_station")
+            to_station = self._pick_ticket_value(ticket, "to_station", "toStation", "to_station_name", "到达站") or params.get("to_station")
+            start_time = self._pick_ticket_value(ticket, "start_time", "startTime", "出发时间") or ""
+            arrive_time = self._pick_ticket_value(ticket, "arrive_time", "arriveTime", "arrival_time", "到达时间") or ""
+            duration = self._pick_ticket_value(ticket, "duration", "lishi", "历时") or ""
+            price = self._pick_ticket_value(ticket, "price", "min_price", "最低票价", "票价") or ""
+            seat_text = self._format_train_seats(ticket)
+            parts = [str(train_no), f"{from_station}-{to_station}"]
+            if start_time or arrive_time:
+                parts.append(f"{start_time}-{arrive_time}".strip("-"))
+            if duration:
+                parts.append(f"历时{duration}")
+            if price:
+                parts.append(f"参考票价{price}")
+            if seat_text:
+                parts.append(seat_text)
+            lines.append("；".join(parts))
+        return "\n".join(lines)
+
+    def _pick_ticket_value(self, ticket: Dict[str, Any], *keys: str) -> Any:
+        for key in keys:
+            value = ticket.get(key)
+            if value not in (None, "", "--"):
+                return value
+        return ""
+
+    def _format_train_seats(self, ticket: Dict[str, Any]) -> str:
+        seat_keys = [
+            ("商务座", ("business_seat", "businessSeat", "swz_num")),
+            ("一等座", ("first_class_seat", "firstClassSeat", "zy_num")),
+            ("二等座", ("second_class_seat", "secondClassSeat", "ze_num")),
+            ("硬卧", ("hard_sleeper", "hardSleeper", "yw_num")),
+            ("硬座", ("hard_seat", "hardSeat", "yz_num")),
+            ("无座", ("no_seat", "noSeat", "wz_num")),
+        ]
+        parts = []
+        for label, keys in seat_keys:
+            value = self._pick_ticket_value(ticket, *keys)
+            if value:
+                parts.append(f"{label}{value}")
+        return "余票：" + "，".join(parts[:4]) if parts else ""
 
     def _extract_location_query(self, query: str) -> str:
         """提取用于位置搜索的关键词：优先返回城市命中，否则清洗掉“天气/明天”等词后返回原句。"""
