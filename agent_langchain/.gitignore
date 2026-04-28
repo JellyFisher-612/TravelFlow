@@ -6,6 +6,12 @@ __pycache__/
 .env
 .env.*
 !.env.example
+API.txt
+*.pem
+*.key
+*.p12
+*.pfx
+config.local.py
 .venv*/
 .mcp-node/
 
