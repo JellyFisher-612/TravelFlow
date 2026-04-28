@@ -2,6 +2,13 @@
 
 import os
 
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except Exception:
+    pass
+
 # LLM Configuration
 LLM_CONFIG = {
     "api_key": os.getenv("DEEPSEEK_API_KEY", ""),

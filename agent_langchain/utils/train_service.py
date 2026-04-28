@@ -25,7 +25,7 @@ class TrainService:
         elif self.command:
             self.args = []
         else:
-            local_bin = Path(".mcp-node/node_modules/.bin/12306-mcp")
+            local_bin = Path(__file__).resolve().parents[1] / ".mcp-node" / "node_modules" / ".bin" / "12306-mcp"
             if local_bin.exists():
                 self.command = str(local_bin)
                 self.args = []

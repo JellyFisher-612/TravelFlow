@@ -52,3 +52,15 @@ description: TravelFlow Search Agent skill. Use it when the system needs externa
 ## 规划约束
 
 行程规划时优先使用 `pois` 和 `weather` 中的真实数据，不要凭空编造景点、天气或路线。
+
+## 行程检索设计
+
+行程规划场景下，Search Agent 会先生成 `search_plan`，再调用垂直工具，最后返回 `search_bundle`：
+
+- `transport.outbound_trains` / `transport.return_trains`：12306 MCP 查询出的去程和返程车次、时间、余票和价格。
+- `destination.pois` / `pois_by_category`：高德 MCP 查询出的景点、餐饮、住宿、交通枢纽等 POI。
+- `destination.nearby`：围绕核心景点查询周边酒店、餐饮和站点。
+- `destination.routes` / `distances`：核心 POI 之间的步行、驾车路线和距离。
+- `quality.verified_fields` / `missing` / `warnings`：说明哪些硬约束已核验，哪些仍缺失或失败。
+
+为了兼容旧版 Plan Agent，Search Agent 仍会在 `results` 顶层保留 `pois`、`weather`、`routes`、`distances` 等字段。

@@ -88,6 +88,20 @@ TravelFlow 对外采用 5 个智能体角色：1 个主智能体和 4 个业务�
 用户询问火车、高铁、动车、车次、票价或余票时，`IntentRecognition` 会调度 `search` 智能体优先走 12306 MCP，返回车次、出发/到达站、出发/到达时间、历时、余票和票价等结构化结果。
 运行该能力需要本机可用的 Node.js / npm / npx。
 
+## Search Agent 检索编排
+
+行程规划场景下，`search` 不再只是按关键词分支查询，而是先根据 `event_data` 生成 `search_plan`，再调用 12306 MCP、高德 MCP 和必要的网页兜底检索，最终返回结构化 `search_bundle`。
+
+`search_bundle` 主要包含：
+
+- `transport.outbound_trains` / `transport.return_trains`：按出发日期和返程日期查询到的合适时间高铁/火车候选、价格和余票。
+- `destination.pois` / `pois_by_category`：目的地景点、博物馆、公园、餐饮、经济型酒店、火车站/高铁站、机场等 POI。
+- `destination.nearby`：围绕核心景点查询的周边住宿、餐饮和交通站点。
+- `destination.routes` / `distances`：核心景点之间的步行、驾车路线和距离。
+- `quality`：已核验字段、缺失字段和失败警告，供 `plan` 智能体避免编造硬约束。
+
+为了兼容既有规划链路，`results` 顶层仍保留 `pois`、`weather`、`routes`、`distances` 等旧字段。
+
 可选环境变量：
 
 - `TRAIN_MCP_COMMAND`
