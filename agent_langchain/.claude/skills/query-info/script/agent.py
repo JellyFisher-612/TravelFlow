@@ -363,6 +363,8 @@ class InformationQueryAgent:
         return ""
 
     def _normalize_train_tickets(self, raw: Any) -> List[Dict[str, Any]]:
+        if isinstance(raw, str):
+            return self._parse_train_ticket_text(raw)
         candidates = raw
         if isinstance(raw, dict):
             candidates = raw.get("tickets") or raw.get("data") or raw.get("results") or raw.get("list") or []
@@ -371,6 +373,68 @@ class InformationQueryAgent:
         if not isinstance(candidates, list):
             return []
         return [item for item in candidates if isinstance(item, dict)]
+
+    def _parse_train_ticket_text(self, text: str) -> List[Dict[str, Any]]:
+        tickets: List[Dict[str, Any]] = []
+        current: Dict[str, Any] | None = None
+        train_line_pattern = re.compile(
+            r"^(?P<train>[A-Z]\d+)\s+"
+            r"(?P<from>.+?)\(telecode:(?P<from_code>[A-Z]+)\)\s*->\s*"
+            r"(?P<to>.+?)\(telecode:(?P<to_code>[A-Z]+)\)\s+"
+            r"(?P<start>\d{2}:\d{2})\s*->\s*(?P<arrive>\d{2}:\d{2})\s+历时：(?P<duration>\d{2}:\d{2})"
+        )
+        seat_pattern = re.compile(r"^-\s*(?P<seat>[^:：]+)[:：]\s*(?P<availability>.+?)\s+(?P<price>\d+(?:\.\d+)?)元")
+
+        for raw_line in (text or "").splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("车次|"):
+                continue
+            train_match = train_line_pattern.match(line)
+            if train_match:
+                if current:
+                    tickets.append(current)
+                current = {
+                    "train_code": train_match.group("train"),
+                    "from_station": train_match.group("from").strip(),
+                    "from_station_code": train_match.group("from_code"),
+                    "to_station": train_match.group("to").strip(),
+                    "to_station_code": train_match.group("to_code"),
+                    "start_time": train_match.group("start"),
+                    "arrive_time": train_match.group("arrive"),
+                    "duration": train_match.group("duration"),
+                    "seats": [],
+                }
+                continue
+
+            seat_match = seat_pattern.match(line)
+            if seat_match and current is not None:
+                seat = {
+                    "seat_type": seat_match.group("seat").strip(),
+                    "availability": seat_match.group("availability").strip(),
+                    "price": f"{seat_match.group('price')}元",
+                }
+                current["seats"].append(seat)
+                self._apply_named_seat_fields(current, seat)
+
+        if current:
+            tickets.append(current)
+        return tickets
+
+    def _apply_named_seat_fields(self, ticket: Dict[str, Any], seat: Dict[str, str]) -> None:
+        seat_type = seat.get("seat_type", "")
+        value = f"{seat.get('availability', '')} {seat.get('price', '')}".strip()
+        mapping = {
+            "商务座": "business_seat",
+            "一等座": "first_class_seat",
+            "二等座": "second_class_seat",
+            "硬卧": "hard_sleeper",
+            "硬座": "hard_seat",
+            "无座": "no_seat",
+        }
+        for label, key in mapping.items():
+            if label in seat_type:
+                ticket[key] = value
+                return
 
     def _format_train_ticket_summary(self, params: Dict[str, str], tickets: List[Dict[str, Any]], raw: Any) -> str:
         route = f"{params.get('date')} {params.get('from_station')} → {params.get('to_station')}"
@@ -418,6 +482,18 @@ class InformationQueryAgent:
             ("无座", ("no_seat", "noSeat", "wz_num")),
         ]
         parts = []
+        seats = ticket.get("seats")
+        if isinstance(seats, list) and seats:
+            for seat in seats[:4]:
+                if not isinstance(seat, dict):
+                    continue
+                seat_type = seat.get("seat_type")
+                availability = seat.get("availability")
+                price = seat.get("price")
+                if seat_type and availability:
+                    parts.append(f"{seat_type}{availability}{f' {price}' if price else ''}")
+            return "余票：" + "，".join(parts) if parts else ""
+
         for label, keys in seat_keys:
             value = self._pick_ticket_value(ticket, *keys)
             if value:

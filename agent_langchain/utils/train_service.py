@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
@@ -15,14 +16,22 @@ class TrainService:
         command: Optional[str] = None,
         args: Optional[List[str]] = None,
     ) -> None:
-        self.command = command or os.getenv("TRAIN_MCP_COMMAND", "npx")
+        self.command = command or os.getenv("TRAIN_MCP_COMMAND", "")
         raw_args = os.getenv("TRAIN_MCP_ARGS", "")
         if args is not None:
             self.args = args
         elif raw_args:
             self.args = raw_args.split()
+        elif self.command:
+            self.args = []
         else:
-            self.args = ["-y", "12306-mcp"]
+            local_bin = Path(".mcp-node/node_modules/.bin/12306-mcp")
+            if local_bin.exists():
+                self.command = str(local_bin)
+                self.args = []
+            else:
+                self.command = "npx"
+                self.args = ["-y", "12306-mcp"]
 
     async def _call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> Any:
         try:
@@ -32,10 +41,15 @@ class TrainService:
             raise RuntimeError("缺少 MCP Python SDK，请先安装 requirements.txt 中的 mcp 依赖") from exc
 
         clean_args = {key: value for key, value in arguments.items() if value not in (None, "")}
+        env = os.environ.copy()
+        bundled_node_bin = Path("/Users/Jelly/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin")
+        if bundled_node_bin.exists():
+            env["PATH"] = f"{bundled_node_bin}{os.pathsep}{env.get('PATH', '')}"
+
         server_params = StdioServerParameters(
             command=self.command,
             args=self.args,
-            env=os.environ.copy(),
+            env=env,
         )
 
         async with stdio_client(server_params) as (read, write):

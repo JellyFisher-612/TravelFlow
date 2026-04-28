@@ -114,10 +114,18 @@ uvicorn web.app:app --reload --host 0.0.0.0 --port 8000
 
 ## 本地运行
 
+要求 Python 3.10+。项目依赖中的 MCP SDK 不支持 Python 3.9。
+
 安装依赖：
 
 ```bash
 pip install -r requirements.txt
+```
+
+如需本地固定安装 12306 MCP（避免每次通过 npx 临时下载）：
+
+```bash
+npm install --prefix .mcp-node 12306-mcp
 ```
 
 CLI：
