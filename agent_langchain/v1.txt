@@ -1,0 +1,186 @@
+前 /home/users/lhy/TravelAgent/agent_langchain 项目框架如下。
+
+  整体架构
+
+  TravelFlow 是一个基于 Python / FastAPI / LangChain / LangGraph 的旅游出行助手。系统采用多智能体架
+  构，智能体之间通过 LangGraph 共享 state 传递信息，不再使用 AgentScope。
+
+  核心运行链路：
+
+  用户输入
+    -> MainAgent 主智能体
+    -> IntentRecognition 意图识别能力
+    -> AgentScheduler 编排工具
+    -> clarification / search / memory / plan
+    -> 聚合结果
+    -> CLI 或 Web 返回
+
+  标准化智能体模型
+
+  当前对外智能体分工：
+
+  | 智能体 | 调度名 | 职责 |
+  |---|---|---|
+  | 主智能体 | MainAgent | 面向用户沟通，理解用户意图，直接回复或按需调用业务智能体 |
+  | 记忆与偏好智能体 | memory | 查询/更新用户偏好、历史行程、行为反馈 |
+  | 事项收集智能体 | clarification | 提取出发地、目的地、时间、天数、缺失信息 |
+  | 信息检索智能体 | search | 调用高德 MCP 查询天气、POI、路线等 |
+  | 行程规划智能体 | plan | 整合信息并生成结构化行程 |
+
+  主智能体内部组件：
+
+  | 组件 | 代码名 | 身份 |
+  |---|---|---|
+  | 意图识别能力 | IntentRecognition | MainAgent 内置能力，生成 agent_schedule |
+  | 业务编排工具 | AgentScheduler | MainAgent 可调用工具，基于 LangGraph 执行业务智能体 |
+
+  兼容说明：旧类名 IntentionAgent / OrchestrationAgent 仍保留为别名。
+
+  共享 State
+
+  智能体之间不传自定义消息对象，而是共享 LangGraph state：
+
+  {
+      "messages": [...],
+      "user_query": "...",
+      "intention_data": {...},
+      "context": {...},
+      "previous_results": [...],
+      "results": [...],
+      "final_result": {...}
+  }
+
+  高德 MCP 接入
+
+  项目现在使用标准 MCP 调用方式，不再直接请求高德 REST API。
+
+  高德服务封装在：
+
+  utils/amap_service.py
+
+  底层调用方式：
+
+  Python MCP ClientSession
+    -> stdio_client
+    -> npx -y @amap/amap-maps-mcp-server
+    -> session.call_tool(...)
+
+  支持的 MCP 工具：
+
+  - maps_geo
+  - maps_regeocode
+  - maps_ip_location
+  - maps_weather
+  - maps_direction_driving
+  - maps_direction_walking
+  - maps_bicycling
+  - maps_distance
+  - maps_text_search
+  - maps_around_search
+  - maps_search_detail
+
+  天气查询只走：
+
+  maps_weather
+
+  旧的 AccuWeather / wttr.in 已删除。
+
+  记忆系统
+
+  记忆系统分两层：
+
+  - 短期记忆：当前会话上下文
+  - 长期记忆：用户偏好、历史行程、行为反馈、对话记录
+
+  实现位置：
+
+  context/short_term_memory.py
+  context/long_term_memory.py
+  context/memory_manager.py
+
+  支持：
+
+  - Redis 缓存
+  - PostgreSQL 长期存储
+  - 本地 JSON fallback
+
+  默认未配置数据库时使用：
+
+  data/memory/*.json
+
+  前后端入口
+
+  CLI：
+
+  python cli.py
+
+  Web：
+
+  uvicorn web.app:app --reload --host 0.0.0.0 --port 8000
+
+  Web 页面：
+
+  web/templates/index.html
+
+  - POST /api/chat
+  - POST /api/chat/stream
+  - GET /api/sessions
+  - GET /api/sessions/{session_id}
+
+  当前已清理内容
+
+  已经删除：
+
+  - AgentScope 兼容层
+  - 旧 RAG / 企业差旅知识库
+  - BGE 本地模型
+  - 旧评测数据
+  - 旧测试目录
+  - 其他 Python 缓存
+
+  当前项目核心就是：
+
+  agents/
+  context/
+  utils/
+  web/
+  .claude/skills/
+  cli.py
+  config.py
+  requirements.txt
+
+  依赖重点
+
+  主要依赖：
+
+  - langchain
+  - langgraph
+  - langchain-openai
+  - fastapi
+  - uvicorn
+  - mcp
+  - redis
+  - psycopg
+  - celery
+  - ddgs
+
+  其中高德 MCP 依赖：
+
+  mcp==1.13.0
+  npx -y @amap/amap-maps-mcp-server
+
+  当前状态
+
+  项目现在的目标架构是：
+
+  LangChain / LangGraph 多智能体
+  + LangGraph shared state
+  + 高德 MCP 工具调用
+  + Redis/PostgreSQL 记忆系统
+  + FastAPI Web 流式输出
+
+
+   结论：目前是一个“可运行的 LangChain/LangGraph 多智能体 TravelFlow 原
+  型”，不是你这段文字中所有工程能力都完全闭环的最终版。最需要补齐的是：规
+  划失败回退补全、行为反馈自动写入、真正的 Agent 中间结果流式输出、清理
+  Skill 文档里的 AgentScope 残留。

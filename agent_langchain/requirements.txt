@@ -1,0 +1,34 @@
+# 基础（milvus_lite 依赖 pkg_resources，需 setuptools<82）
+setuptools>=69.0.0,<82
+
+# LangChain / LangGraph
+langchain==0.3.27
+langchain-core==0.3.76
+langchain-openai==0.3.33
+langgraph==0.6.7
+pydantic==2.11.7
+PyYAML==6.0.2
+
+# LLM 调用
+requests==2.32.3
+
+# MCP client
+mcp==1.13.0
+
+# CLI 界面
+rich==13.9.4
+
+# Web 界面
+fastapi==0.116.1
+starlette==0.47.3
+uvicorn==0.35.0
+
+# 异步任务调度
+celery==5.5.3
+
+# 通用搜索兜底（主链路优先使用高德 API）
+ddgs==9.10.0
+
+# Memory backends
+redis==5.3.1
+psycopg[binary]==3.2.10
