@@ -230,7 +230,6 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
             session_id = req.session_id
             state = None
             try:
-                queue.put_nowait({"type": "trace", "message": "🧠 主智能体正在理解用户需求..."})
                 if not session_id:
                     queue.put_nowait({"type": "trace", "message": "正在创建新会话..."})
 

@@ -23,6 +23,7 @@ from utils.structured_output_guard import (
     should_attempt_structured_output,
 )
 from utils.amap_service import AmapService
+from utils.json_parser import robust_json_parse
 from utils.langchain_runtime import ainvoke_text
 from utils.train_service import TrainService
 
@@ -35,6 +36,15 @@ Field = getattr(_pydantic, "Field")
 
 class SummaryOutput(BaseModel):
     summary: str = Field(default="")
+
+
+class SearchPlanOutput(BaseModel):
+    search_strategy: str = Field(default="")
+    demand_profile: dict = Field(default_factory=dict)
+    tasks: list = Field(default_factory=list)
+    must_verify: list = Field(default_factory=list)
+    blocking_missing_fields: list = Field(default_factory=list)
+    non_blocking_gaps: list = Field(default_factory=list)
 
 # 尝试导入 duckduckgo_search (旧包名) 或 ddgs (新包名)
 try:
@@ -258,6 +268,7 @@ class InformationQueryAgent:
             sort_flag=sort_flag,
             sort_reverse=False,
             limited_num=10,
+            response_format="json",
         )
         tickets = self._normalize_train_tickets(raw)
         summary = self._format_train_ticket_summary(params, tickets, raw)
@@ -372,7 +383,73 @@ class InformationQueryAgent:
             candidates = candidates.get("tickets") or candidates.get("list") or []
         if not isinstance(candidates, list):
             return []
-        return [item for item in candidates if isinstance(item, dict)]
+        return [self._normalize_train_ticket_item(item) for item in candidates if isinstance(item, dict)]
+
+    def _normalize_train_ticket_item(self, ticket: Dict[str, Any]) -> Dict[str, Any]:
+        normalized = dict(ticket)
+        normalized["train_code"] = (
+            self._pick_ticket_value(ticket, "train_code", "trainNo", "station_train_code", "start_train_code", "车次")
+            or ""
+        )
+        normalized["from_station"] = (
+            self._pick_ticket_value(ticket, "from_station", "fromStation", "from_station_name", "出发站")
+            or ""
+        )
+        normalized["to_station"] = (
+            self._pick_ticket_value(ticket, "to_station", "toStation", "to_station_name", "到达站")
+            or ""
+        )
+        normalized["from_station_code"] = (
+            self._pick_ticket_value(ticket, "from_station_code", "from_station_telecode", "fromStationCode")
+            or ""
+        )
+        normalized["to_station_code"] = (
+            self._pick_ticket_value(ticket, "to_station_code", "to_station_telecode", "toStationCode")
+            or ""
+        )
+        normalized["start_time"] = self._pick_ticket_value(ticket, "start_time", "startTime", "出发时间") or ""
+        normalized["arrive_time"] = (
+            self._pick_ticket_value(ticket, "arrive_time", "arriveTime", "arrival_time", "到达时间")
+            or ""
+        )
+        normalized["duration"] = self._pick_ticket_value(ticket, "duration", "lishi", "历时") or ""
+
+        prices = ticket.get("prices")
+        if isinstance(prices, list):
+            seats = []
+            for price in prices:
+                if not isinstance(price, dict):
+                    continue
+                seat_type = str(price.get("seat_name") or price.get("seat_type") or "").strip()
+                if not seat_type:
+                    continue
+                availability = self._format_train_ticket_status(price.get("num"))
+                price_value = price.get("price")
+                price_text = "" if price_value in (None, "") else f"{price_value}元"
+                seat = {
+                    "seat_type": seat_type,
+                    "availability": availability,
+                    "price": price_text,
+                }
+                seats.append(seat)
+                self._apply_named_seat_fields(normalized, seat)
+            if seats:
+                normalized["seats"] = seats
+
+        return normalized
+
+    def _format_train_ticket_status(self, value: Any) -> str:
+        text = "" if value is None else str(value).strip()
+        if not text or text in {"--", "无"}:
+            return "无票"
+        if text in {"有", "充足"}:
+            return "有票"
+        if text == "候补":
+            return "无票需候补"
+        if text.isdigit():
+            count = int(text)
+            return "无票" if count == 0 else f"剩余{count}张票"
+        return text if text.endswith("票") else f"{text}票"
 
     def _parse_train_ticket_text(self, text: str) -> List[Dict[str, Any]]:
         tickets: List[Dict[str, Any]] = []
@@ -726,7 +803,7 @@ class InformationQueryAgent:
             raise ValueError("event_data 中缺少 destination 字段，无法进行行程信息查询")
 
         amap = AmapService()
-        search_plan = self._build_trip_search_plan(event_data, user_query, refinement_requests or [])
+        search_plan = await self._build_trip_search_plan(event_data, user_query, refinement_requests or [])
 
         geocodes_task = asyncio.create_task(amap.maps_geo(address=destination))
         weather_task = asyncio.create_task(amap.maps_weather(city=destination))
@@ -802,6 +879,13 @@ class InformationQueryAgent:
             )
 
         search_bundle = {
+            "planning": {
+                "search_strategy": search_plan.get("search_strategy", ""),
+                "demand_profile": search_plan.get("demand_profile", {}),
+                "must_verify": search_plan.get("must_verify", []),
+                "blocking_missing_fields": search_plan.get("blocking_missing_fields", []),
+                "non_blocking_gaps": search_plan.get("non_blocking_gaps", []),
+            },
             "transport": transport,
             "destination": {
                 "name": destination,
@@ -814,7 +898,16 @@ class InformationQueryAgent:
                 "routes": routes,
                 "distances": distances,
             },
-            "quality": self._build_search_quality_report(event_data, transport, pois, weather, nearby, routes),
+            "quality": self._build_search_quality_report(
+                event_data,
+                transport,
+                pois,
+                weather,
+                nearby,
+                routes,
+                search_plan,
+                supplemental_search,
+            ),
             "sources": [
                 {"title": "Amap MCP", "source_type": "official_map", "trust_level": "high", "official": True},
                 {"title": "12306 MCP", "source_type": "official_transport", "trust_level": "high", "official": True},
@@ -831,6 +924,11 @@ class InformationQueryAgent:
                 "destination": destination,
                 "event_data": event_data,
                 "search_plan": search_plan.get("tasks", []),
+                "search_strategy": search_plan.get("search_strategy", ""),
+                "demand_profile": search_plan.get("demand_profile", {}),
+                "must_verify": search_plan.get("must_verify", []),
+                "blocking_missing_fields": search_plan.get("blocking_missing_fields", []),
+                "non_blocking_gaps": search_plan.get("non_blocking_gaps", []),
                 "search_bundle": search_bundle,
                 "transport": transport,
                 "geocodes": geocodes,
@@ -853,12 +951,47 @@ class InformationQueryAgent:
             },
         }
 
-    def _build_trip_search_plan(
+    async def _build_trip_search_plan(
         self,
         event_data: Dict[str, Any],
         user_query: str,
         refinement_requests: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
+        """Build a demand-aware search plan before executing external tools."""
+
+        base_tasks = self._build_base_trip_search_tasks(event_data, user_query, refinement_requests)
+        profile = self._infer_trip_search_profile(event_data, user_query, refinement_requests)
+        augmented_tasks = self._augment_tasks_for_profile(base_tasks, profile, event_data)
+        planner_output = await self._llm_refine_trip_search_plan(
+            event_data=event_data,
+            user_query=user_query,
+            refinement_requests=refinement_requests,
+            base_tasks=augmented_tasks,
+            profile=profile,
+        )
+
+        tasks = self._merge_search_tasks(augmented_tasks, planner_output.get("tasks", []), event_data)
+        tasks_by_type: Dict[str, List[Dict[str, Any]]] = {}
+        for task in tasks:
+            tasks_by_type.setdefault(str(task.get("type")), []).append(task)
+
+        return {
+            "event_data": event_data,
+            "search_strategy": planner_output.get("search_strategy") or profile.get("search_strategy", ""),
+            "demand_profile": {**profile, **(planner_output.get("demand_profile") or {})},
+            "tasks": tasks,
+            "tasks_by_type": tasks_by_type,
+            "must_verify": planner_output.get("must_verify") or profile.get("must_verify", []),
+            "blocking_missing_fields": planner_output.get("blocking_missing_fields") or profile.get("blocking_missing_fields", []),
+            "non_blocking_gaps": planner_output.get("non_blocking_gaps") or profile.get("non_blocking_gaps", []),
+        }
+
+    def _build_base_trip_search_tasks(
+        self,
+        event_data: Dict[str, Any],
+        user_query: str,
+        refinement_requests: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
         destination = str(event_data.get("destination") or "").strip()
         origin = str(event_data.get("origin") or "").strip()
         return_location = str(event_data.get("return_location") or origin or "").strip()
@@ -904,6 +1037,7 @@ class InformationQueryAgent:
             )
 
         transport_preference = f"{user_query} {event_data.get('transportation_preference') or ''}"
+        train_filter_flags = self._train_filter_flags(transport_preference)
         if origin and destination and start_date and self._should_query_train(transport_preference):
             tasks.append(
                 {
@@ -913,6 +1047,7 @@ class InformationQueryAgent:
                     "date": start_date,
                     "from_station": origin,
                     "to_station": destination,
+                    "train_filter_flags": train_filter_flags,
                     "time_window": ["07:00", "13:30"],
                     "reason": "去程交通是硬约束，需要查询当天合适出发时间的车次、余票和价格。",
                 }
@@ -926,6 +1061,7 @@ class InformationQueryAgent:
                     "date": end_date,
                     "from_station": destination,
                     "to_station": return_location,
+                    "train_filter_flags": train_filter_flags,
                     "time_window": ["14:00", "21:30"],
                     "reason": "返程交通是硬约束，需要查询当天下午/晚上合适回程车次、余票和价格。",
                 }
@@ -950,14 +1086,320 @@ class InformationQueryAgent:
                 }
             )
 
-        tasks_by_type: Dict[str, List[Dict[str, Any]]] = {}
-        for task in tasks:
-            tasks_by_type.setdefault(str(task.get("type")), []).append(task)
+        return tasks
+
+    def _infer_trip_search_profile(
+        self,
+        event_data: Dict[str, Any],
+        user_query: str,
+        refinement_requests: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        q = " ".join(
+            [
+                user_query or "",
+                str(event_data.get("travel_theme") or ""),
+                str(event_data.get("companion_type") or ""),
+                str(event_data.get("pace_preference") or ""),
+                str(event_data.get("budget_level") or ""),
+                " ".join(
+                    str(item.get("keywords") or item.get("query") or item)
+                    for item in refinement_requests
+                    if isinstance(item, (dict, str))
+                ),
+            ]
+        )
+
+        focus_tags = []
+        keyword_rules = [
+            ("family", ("亲子", "孩子", "儿童", "小孩", "带娃")),
+            ("senior_friendly", ("老人", "父母", "长辈", "腿脚", "少走路")),
+            ("food", ("美食", "吃", "餐厅", "小吃", "夜市", "老字号")),
+            ("hidden_gems", ("小众", "人少", "避开人多", "不排队", "冷门")),
+            ("photography", ("拍照", "摄影", "打卡", "出片", "夜景")),
+            ("culture", ("历史", "文化", "博物馆", "展览", "古迹")),
+            ("shopping", ("购物", "商场", "买东西", "伴手礼")),
+            ("nightlife", ("夜游", "夜生活", "酒吧", "夜景")),
+            ("rain_backup", ("下雨", "雨天", "室内", "天气不好")),
+            ("budget", ("省钱", "经济", "便宜", "预算低", "平价")),
+            ("premium", ("高端", "品质", "豪华", "舒适", "预算充足")),
+            ("accessibility", ("无障碍", "轮椅", "婴儿车", "少走路")),
+        ]
+        for tag, words in keyword_rules:
+            if any(word in q for word in words):
+                focus_tags.append(tag)
+
+        must_verify = ["destination_pois", "weather"]
+        hard_constraints = []
+        if event_data.get("origin") and event_data.get("destination") and event_data.get("start_date"):
+            hard_constraints.append("transport_options")
+            if self._should_query_train(f"{user_query} {event_data.get('transportation_preference') or ''}"):
+                must_verify.append("train_tickets")
+        if any(word in q for word in ("开放时间", "营业时间", "门票", "预约", "闭馆", "限流")):
+            hard_constraints.extend(["opening_hours", "ticket_or_reservation_policy"])
+            must_verify.append("official_attraction_policy")
+        if any(word in q for word in ("酒店", "住宿", "住哪", "民宿")):
+            hard_constraints.append("lodging_area")
+            must_verify.append("lodging_candidates")
+        if any(word in q for word in ("路线", "交通", "地铁", "打车", "步行", "动线")):
+            hard_constraints.append("route_distance")
+            must_verify.append("routes")
+
+        blocking_missing_fields = []
+        for field in ("destination", "start_date", "duration_days"):
+            if event_data.get(field) in (None, "", []):
+                blocking_missing_fields.append(field)
+
+        search_strategy = "先核验硬约束，再按用户偏好补充 POI、周边服务和路线；未核验的门票、预约、库存、余票不作为确定事实。"
         return {
-            "event_data": event_data,
-            "tasks": tasks,
-            "tasks_by_type": tasks_by_type,
+            "focus_tags": focus_tags,
+            "hard_constraints": hard_constraints,
+            "must_verify": list(dict.fromkeys(must_verify)),
+            "blocking_missing_fields": blocking_missing_fields,
+            "non_blocking_gaps": [],
+            "search_strategy": search_strategy,
+            "requires_official_sources": bool(hard_constraints),
         }
+
+    def _augment_tasks_for_profile(
+        self,
+        tasks: List[Dict[str, Any]],
+        profile: Dict[str, Any],
+        event_data: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        destination = str(event_data.get("destination") or "").strip()
+        focus_tags = set(profile.get("focus_tags") or [])
+        augmented = list(tasks)
+
+        tag_tasks = {
+            "family": [
+                ("poi_search", "亲子 景点 儿童乐园 科技馆", "根据亲子需求补充适合儿童的景点。"),
+                ("web_search", "亲子游 注意事项 预约 门票", "核验亲子出行的预约、门票和年龄限制。"),
+            ],
+            "senior_friendly": [
+                ("poi_search", "公园 博物馆 休闲 景点", "根据长辈同行补充低强度景点。"),
+                ("web_search", "老人友好 无障碍 少走路 路线", "补充长辈友好和无障碍信息。"),
+            ],
+            "food": [
+                ("poi_search", "特色美食 老字号 餐厅", "根据美食需求补充餐饮候选。"),
+                ("poi_search", "夜市 小吃街", "补充夜间餐饮和小吃街候选。"),
+            ],
+            "hidden_gems": [
+                ("poi_search", "小众景点 人少", "根据小众需求补充游客较少的地点。"),
+                ("web_search", "小众路线 避开人多", "补充普通 POI 搜索难覆盖的小众路线信息。"),
+            ],
+            "photography": [
+                ("poi_search", "摄影 打卡 观景台 夜景", "根据拍照需求补充出片地点。"),
+            ],
+            "culture": [
+                ("poi_search", "历史文化 博物馆 展览 古迹", "根据文化需求补充文化类地点。"),
+            ],
+            "shopping": [
+                ("poi_search", "商圈 购物中心 伴手礼", "根据购物需求补充商圈和伴手礼地点。"),
+            ],
+            "nightlife": [
+                ("poi_search", "夜景 夜游 夜市", "根据夜游需求补充夜间活动地点。"),
+            ],
+            "rain_backup": [
+                ("poi_search", "室内景点 博物馆 商场", "根据雨天需求补充室内备选。"),
+            ],
+            "budget": [
+                ("poi_search", "平价餐厅 经济型酒店 青年旅舍", "根据低预算需求补充平价候选。"),
+            ],
+            "premium": [
+                ("poi_search", "高端酒店 精品酒店 黑珍珠 餐厅", "根据品质需求补充高端候选。"),
+            ],
+            "accessibility": [
+                ("web_search", "无障碍 婴儿车 轮椅 交通", "核验无障碍和少步行信息。"),
+            ],
+        }
+
+        for tag in focus_tags:
+            for task_type, keywords, reason in tag_tasks.get(tag, []):
+                augmented.append(
+                    {
+                        "type": task_type,
+                        "provider": "amap" if task_type == "poi_search" else "web",
+                        "category": tag,
+                        "city": destination,
+                        "keywords": keywords,
+                        "reason": reason,
+                        "expected_output": "补充与用户明确需求相关的外部信息。",
+                    }
+                )
+
+        if "official_attraction_policy" in set(profile.get("must_verify") or []):
+            augmented.append(
+                {
+                    "type": "web_search",
+                    "provider": "web",
+                    "category": "official_policy",
+                    "city": destination,
+                    "keywords": "官方 开放时间 门票 预约",
+                    "reason": "门票、预约、开放时间属于硬约束，需要优先寻找官方或准官方来源。",
+                    "expected_output": "官方开放时间、预约和票务政策。",
+                    "requires_official_source": True,
+                    "blocking": False,
+                }
+            )
+
+        return augmented
+
+    async def _llm_refine_trip_search_plan(
+        self,
+        event_data: Dict[str, Any],
+        user_query: str,
+        refinement_requests: List[Dict[str, Any]],
+        base_tasks: List[Dict[str, Any]],
+        profile: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        if not self.model:
+            return {}
+
+        compact_tasks = [
+            {
+                "type": task.get("type"),
+                "provider": task.get("provider"),
+                "category": task.get("category"),
+                "keywords": task.get("keywords") or task.get("target") or task.get("city"),
+                "reason": task.get("reason"),
+            }
+            for task in base_tasks[:18]
+        ]
+        prompt = f"""你是 TravelFlow 的 Search Planner。请先判断用户需求需要搜什么，再补充少量高价值检索任务。
+
+只返回 JSON，不要写 Markdown。
+
+【用户需求】
+{user_query}
+
+【结构化行程信息】
+{json.dumps(event_data, ensure_ascii=False)}
+
+【规划智能体追加检索请求】
+{json.dumps(refinement_requests, ensure_ascii=False)}
+
+【当前规则画像】
+{json.dumps(profile, ensure_ascii=False)}
+
+【已有基础任务】
+{json.dumps(compact_tasks, ensure_ascii=False)}
+
+输出 JSON schema：
+{{
+  "search_strategy": "一句话说明搜索策略",
+  "demand_profile": {{
+    "focus_tags": ["family|food|hidden_gems|photography|culture|shopping|nightlife|rain_backup|senior_friendly|accessibility|budget|premium"],
+    "hard_constraints": ["transport_options|opening_hours|ticket_or_reservation_policy|lodging_area|route_distance"]
+  }},
+  "tasks": [
+    {{
+      "type": "poi_search|web_search",
+      "provider": "amap|web",
+      "category": "短类别名",
+      "keywords": "要搜索的关键词，不要超过18个汉字",
+      "reason": "为什么需要搜",
+      "expected_output": "期望得到什么",
+      "requires_official_source": false,
+      "blocking": false
+    }}
+  ],
+  "must_verify": ["必须核验的事实字段"],
+  "blocking_missing_fields": ["如果缺失就应阻断规划的字段"],
+  "non_blocking_gaps": ["可以提示但不阻断的问题"]
+}}
+
+规则：
+1. 不要重复已有基础任务。
+2. 最多新增 6 个任务。
+3. 门票、预约、开放时间、余票、票价、酒店库存必须标记 requires_official_source=true。
+4. 不确定的内容不要写成已确认事实，只作为检索目标。
+"""
+        try:
+            planner = await self._invoke_search_planner(prompt)
+            return {
+                "search_strategy": planner.search_strategy,
+                "demand_profile": planner.demand_profile or {},
+                "tasks": planner.tasks or [],
+                "must_verify": planner.must_verify or [],
+                "blocking_missing_fields": planner.blocking_missing_fields or [],
+                "non_blocking_gaps": planner.non_blocking_gaps or [],
+            }
+        except Exception as e:
+            logger.warning("Search planner refinement failed, using rule-based plan: %s", e)
+            return {}
+
+    async def _invoke_search_planner(self, prompt: str) -> SearchPlanOutput:
+        lc_model = self.model
+        if should_attempt_structured_output(lc_model):
+            try:
+                structured_llm = lc_model.with_structured_output(SearchPlanOutput)
+                result = await structured_llm.ainvoke(prompt)
+                if isinstance(result, SearchPlanOutput):
+                    return result
+                if isinstance(result, dict):
+                    return SearchPlanOutput.model_validate(result)
+            except Exception as e:
+                if is_structured_output_unavailable_error(e):
+                    mark_structured_output_unsupported(lc_model)
+                    logger.info("Structured planner output disabled for current model, fallback to text parsing")
+                else:
+                    logger.warning("Structured planner output failed, fallback to text parsing: %s", e)
+
+        text = await ainvoke_text(self.model, [{"role": "user", "content": prompt}])
+        parsed = robust_json_parse(text, fallback={})
+        if not isinstance(parsed, dict):
+            parsed = {}
+        return SearchPlanOutput.model_validate(parsed)
+
+    def _merge_search_tasks(
+        self,
+        base_tasks: List[Dict[str, Any]],
+        extra_tasks: List[Dict[str, Any]],
+        event_data: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        destination = str(event_data.get("destination") or "").strip()
+        merged: List[Dict[str, Any]] = []
+        seen = set()
+
+        def normalize_task(task: Dict[str, Any]) -> Dict[str, Any] | None:
+            if not isinstance(task, dict):
+                return None
+            task_type = str(task.get("type") or "").strip()
+            if task_type not in {"geocode", "weather", "poi_search", "train", "web_search"}:
+                return None
+            normalized = dict(task)
+            normalized["type"] = task_type
+            if task_type == "poi_search":
+                normalized["provider"] = "amap"
+                normalized["city"] = str(normalized.get("city") or destination)
+                normalized["keywords"] = str(normalized.get("keywords") or normalized.get("query") or "").strip()
+                if not normalized["keywords"]:
+                    return None
+            elif task_type == "web_search":
+                normalized["provider"] = "web"
+                normalized["city"] = str(normalized.get("city") or destination)
+                normalized["keywords"] = str(normalized.get("keywords") or normalized.get("query") or "").strip()
+                if not normalized["keywords"]:
+                    return None
+            return normalized
+
+        for raw_task in list(base_tasks) + list(extra_tasks or [])[:6]:
+            task = normalize_task(raw_task)
+            if not task:
+                continue
+            key = (
+                task.get("type"),
+                task.get("provider"),
+                task.get("city"),
+                task.get("keywords") or task.get("target") or task.get("direction"),
+                task.get("date"),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(task)
+
+        return merged
 
     def _derive_end_date(self, start_date: str, duration_days: Any) -> str:
         if not start_date or not duration_days:
@@ -991,15 +1433,19 @@ class InformationQueryAgent:
                 "from_station": str(task.get("from_station") or ""),
                 "to_station": str(task.get("to_station") or ""),
             }
+            earliest_start_time, latest_start_time = self._time_window_hours(task.get("time_window"))
             try:
                 raw = await TrainService().get_tickets(
                     date=params["date"],
                     from_station=params["from_station"],
                     to_station=params["to_station"],
-                    train_filter_flags=self._train_filter_flags(user_query or "高铁"),
+                    train_filter_flags=str(task.get("train_filter_flags") or self._train_filter_flags(user_query or "")),
+                    earliest_start_time=earliest_start_time,
+                    latest_start_time=latest_start_time,
                     sort_flag="startTime",
                     sort_reverse=task.get("direction") == "return",
                     limited_num=80,
+                    response_format="json",
                 )
                 tickets = self._normalize_train_tickets(raw)
                 selected = self._select_time_fit_trains(tickets, task.get("time_window"))
@@ -1032,6 +1478,24 @@ class InformationQueryAgent:
             else:
                 transport["outbound_trains"] = item.get("tickets", [])
         return transport
+
+    def _time_window_hours(self, time_window: Any) -> tuple[int | None, int | None]:
+        if not isinstance(time_window, list) or len(time_window) != 2:
+            return None, None
+
+        def parse_hour(value: Any, round_up: bool = False) -> int | None:
+            match = re.match(r"^(\d{1,2})(?::(\d{1,2}))?$", str(value or "").strip())
+            if not match:
+                return None
+            hour = int(match.group(1))
+            minute = int(match.group(2) or 0)
+            if round_up and minute > 0:
+                hour += 1
+            if 0 <= hour <= 24:
+                return hour
+            return None
+
+        return parse_hour(time_window[0]), parse_hour(time_window[1], round_up=True)
 
     def _select_time_fit_trains(self, tickets: List[Dict[str, Any]], time_window: Any, limit: int = 6) -> List[Dict[str, Any]]:
         if not tickets:
@@ -1199,7 +1663,11 @@ class InformationQueryAgent:
         weather: Any,
         nearby: Dict[str, Any],
         routes: List[Dict[str, Any]],
+        search_plan: Dict[str, Any] | None = None,
+        supplemental_search: List[Dict[str, Any]] | None = None,
     ) -> Dict[str, Any]:
+        search_plan = search_plan or {}
+        supplemental_search = supplemental_search or []
         missing = []
         warnings = []
         verified = []
@@ -1208,7 +1676,11 @@ class InformationQueryAgent:
                 verified.append("outbound_train_options")
             else:
                 missing.append("outbound_train_options")
-        if event_data.get("end_date") and event_data.get("return_location"):
+        has_return_query = any(
+            item.get("task", {}).get("direction") == "return"
+            for item in transport.get("queries", [])
+        )
+        if has_return_query or (event_data.get("end_date") and event_data.get("return_location")):
             if transport.get("return_trains"):
                 verified.append("return_train_options")
             else:
@@ -1235,10 +1707,47 @@ class InformationQueryAgent:
             missing.append("poi_routes")
         for error in transport.get("errors", []):
             warnings.append(f"train_query_failed: {error.get('params')} {error.get('error')}")
+
+        verification_aliases = set(verified)
+        if transport.get("outbound_trains") or transport.get("return_trains"):
+            verification_aliases.update({"train_tickets", "transport_options"})
+        if nearby.get("hotels"):
+            verification_aliases.update({"lodging_candidates", "lodging_area"})
+        if routes:
+            verification_aliases.update({"routes", "route_distance"})
+        if any(item.get("verified") for item in supplemental_search):
+            verification_aliases.update({"official_attraction_policy", "opening_hours", "ticket_or_reservation_policy"})
+
+        planned_must_verify = [
+            str(item)
+            for item in search_plan.get("must_verify", [])
+            if str(item) not in verification_aliases
+        ]
+        blocking_missing = [
+            str(item)
+            for item in search_plan.get("blocking_missing_fields", [])
+            if event_data.get(str(item)) in (None, "", [])
+        ]
+        non_blocking_gaps = [
+            str(item)
+            for item in search_plan.get("non_blocking_gaps", [])
+            if item
+        ]
+        for item in planned_must_verify:
+            if item not in missing:
+                missing.append(item)
+        for item in blocking_missing:
+            if item not in missing:
+                missing.append(item)
+
         return {
             "verified_fields": verified,
             "missing": missing,
             "warnings": warnings,
+            "must_verify": search_plan.get("must_verify", []),
+            "unverified_must_verify": planned_must_verify,
+            "blocking_missing_fields": blocking_missing,
+            "non_blocking_gaps": non_blocking_gaps,
             "hard_constraints_require_official_sources": True,
         }
 

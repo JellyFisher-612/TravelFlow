@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import importlib
+import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Union
 
@@ -47,6 +48,7 @@ class IntentionOutput(BaseModel):
     key_entities: Dict[str, Any] = Field(default_factory=dict)
     rewritten_query: str = Field(default="", description="标准化查询")
     agent_schedule: List[AgentScheduleItem] = Field(default_factory=list)
+    direct_answer: str = Field(default="", description="无需调度业务智能体时的直接回复")
 
 
 class IntentRecognition:
@@ -195,27 +197,7 @@ Priority 3:
             result = await self._invoke_structured(prompt)
         except Exception as e:
             logger.error("Intent recognition failed: %s", e)
-            result = IntentionOutput(
-                reasoning=f"意图识别出错，使用默认策略。错误: {str(e)}",
-                intents=[
-                    IntentItem(
-                        type="search",
-                        confidence=0.5,
-                        description="默认查询意图",
-                        reason="无法解析用户意图，使用默认策略",
-                    )
-                ],
-                key_entities={},
-                rewritten_query=str(user_query),
-                agent_schedule=[
-                    AgentScheduleItem(
-                        agent_name="search",
-                        priority=1,
-                        reason="默认查询",
-                        expected_output="查询结果",
-                    )
-                ],
-            )
+            result = self._build_error_fallback_intention(user_query, e)
 
         result_dict = result.model_dump()
         if not result_dict.get("rewritten_query"):
@@ -345,6 +327,7 @@ Priority 3:
     def _is_direct_conversation_query(self, query: str) -> bool:
         if not query:
             return False
+        normalized_query = self._normalize_direct_query(query)
         if any(phrase in query for phrase in ("我是谁", "知道我是谁", "认识我")):
             return False
         exact_queries = {
@@ -363,8 +346,25 @@ Priority 3:
             "你可以做什么",
             "你有什么功能",
             "怎么用",
+            "在吗",
+            "在不在",
+            "有人吗",
+            "谢谢",
+            "谢谢你",
+            "多谢",
+            "感谢",
+            "thanks",
+            "thankyou",
+            "thx",
+            "好的",
+            "好",
+            "ok",
+            "okay",
+            "嗯",
+            "明白",
+            "收到",
         }
-        if query in exact_queries:
+        if normalized_query in exact_queries:
             return True
         return any(
             phrase in query
@@ -378,17 +378,83 @@ Priority 3:
 
     def _build_direct_conversation_answer(self, user_query: str) -> str:
         query = (user_query or "").strip().lower()
+        normalized_query = self._normalize_direct_query(query)
         if any(phrase in query for phrase in ("你能做什么", "你会做什么", "你可以做什么", "你有什么功能", "怎么用")):
             return (
                 "我可以帮你做旅行规划：收集目的地、出发地、时间、预算和同行人信息；"
                 "查询高德 MCP 提供的天气、地点和路线数据；结合你的历史偏好生成个性化行程。"
                 "你可以直接说：帮我规划下周从上海去北京玩三天。"
             )
-        if query in {"你好", "您好", "hello", "hi", "嗨"}:
+        if normalized_query in {"你好", "您好", "hello", "hi", "嗨"}:
             return "你好，我是 TravelFlow 旅游出行助手。你可以直接告诉我想去哪里、从哪里出发、什么时候去和玩几天。"
+        if normalized_query in {"在吗", "在不在", "有人吗"}:
+            return "我在。你可以告诉我目的地、出发地、时间、天数和偏好，我来帮你规划行程。"
+        if normalized_query in {"谢谢", "谢谢你", "多谢", "感谢", "thanks", "thankyou", "thx"}:
+            return "不客气。后续如果要继续调整目的地、时间、预算或节奏，可以直接告诉我。"
+        if normalized_query in {"好的", "好", "ok", "okay", "嗯", "明白", "收到"}:
+            return "好的。你可以继续补充目的地、出发地、时间、天数、预算或偏好。"
         return (
             "我是 TravelFlow 旅游出行助手，一个基于 LangChain/LangGraph 多智能体架构的旅行规划系统。"
             "我可以帮你收集出行意向、查询目的地信息和天气、结合你的偏好生成行程，也能记住你的长期旅行偏好。"
+        )
+
+    def _normalize_direct_query(self, query: str) -> str:
+        """Normalize short meta/chat queries for deterministic routing."""
+        normalized = (query or "").strip().lower()
+        normalized = re.sub(r"[\s\ufeff\u200b]+", "", normalized)
+        normalized = re.sub(r"[。！？!?，,、；;：:\"'“”‘’（）()\[\]{}<>《》~～.]+$", "", normalized)
+        normalized = re.sub(r"^[。！？!?，,、；;：:\"'“”‘’（）()\[\]{}<>《》~～.]+", "", normalized)
+        return normalized
+
+    def _build_error_fallback_intention(self, user_query: str, error: Exception) -> IntentionOutput:
+        """Use deterministic routing when the LLM intent recognizer is unavailable."""
+        direct_result = self._try_direct_intent(user_query)
+        if direct_result:
+            return IntentionOutput.model_validate(
+                {
+                    **direct_result,
+                    "reasoning": f"{direct_result.get('reasoning', '')}（LLM 意图识别不可用，使用规则兜底。错误: {error}）",
+                }
+            )
+
+        query = (user_query or "").strip()
+        if not query:
+            return IntentionOutput(
+                reasoning=f"意图识别出错且用户输入为空，直接提示用户补充需求。错误: {error}",
+                intents=[
+                    IntentItem(
+                        type="conversation",
+                        confidence=1.0,
+                        description="空输入",
+                        reason="没有可用于搜索或规划的用户需求。",
+                    )
+                ],
+                key_entities={},
+                rewritten_query=query,
+                direct_answer="我在。你可以告诉我想去哪里、从哪里出发、什么时候去和玩几天。",
+                agent_schedule=[],
+            )
+
+        return IntentionOutput(
+            reasoning=f"意图识别出错，使用保守信息查询兜底。错误: {error}",
+            intents=[
+                IntentItem(
+                    type="search",
+                    confidence=0.4,
+                    description="保守信息查询兜底",
+                    reason="无法调用 LLM 识别意图，且规则未命中直接回复、天气、车次或规划请求。",
+                )
+            ],
+            key_entities={},
+            rewritten_query=query,
+            agent_schedule=[
+                AgentScheduleItem(
+                    agent_name="search",
+                    priority=1,
+                    reason="保守信息查询兜底",
+                    expected_output="查询结果",
+                )
+            ],
         )
 
     def _try_direct_intent(self, user_query: str) -> Optional[Dict[str, Any]]:
@@ -429,7 +495,7 @@ Priority 3:
             }
 
         greeting_words = ("你好", "您好", "hello", "hi", "嗨")
-        if query.lower() in greeting_words:
+        if self._normalize_direct_query(query) in greeting_words:
             return {
                 "reasoning": "用户只是打招呼，属于普通对话，不需要调用外部搜索或规划智能体。",
                 "intents": [
@@ -445,6 +511,64 @@ Priority 3:
                 "direct_answer": "你好，我是 TravelFlow 旅游出行助手。你可以告诉我目的地、出发地、时间、天数和偏好，我来帮你规划行程。",
                 "agent_schedule": [],
             }
+
+        presence_queries = ("在吗", "在不在", "有人吗")
+        if self._normalize_direct_query(query) in presence_queries:
+            return {
+                "reasoning": "用户在确认助手是否在线，属于普通对话，不需要调用外部搜索或规划智能体。",
+                "intents": [
+                    {
+                        "type": "conversation",
+                        "confidence": 1.0,
+                        "description": "在线确认",
+                        "reason": "用户询问助手是否在。",
+                    }
+                ],
+                "key_entities": {},
+                "rewritten_query": query,
+                "direct_answer": "我在。你可以告诉我目的地、出发地、时间、天数和偏好，我来帮你规划行程。",
+                "agent_schedule": [],
+            }
+
+        thanks_queries = ("谢谢", "谢谢你", "多谢", "感谢", "thanks", "thankyou", "thx")
+        if self._normalize_direct_query(query) in thanks_queries:
+            return {
+                "reasoning": "用户表达感谢，属于普通对话，不需要调用外部搜索或规划智能体。",
+                "intents": [
+                    {
+                        "type": "conversation",
+                        "confidence": 1.0,
+                        "description": "感谢回应",
+                        "reason": "用户表达感谢。",
+                    }
+                ],
+                "key_entities": {},
+                "rewritten_query": query,
+                "direct_answer": "不客气。后续如果要继续调整目的地、时间、预算或节奏，可以直接告诉我。",
+                "agent_schedule": [],
+            }
+
+        confirmation_queries = ("好的", "好", "ok", "okay", "嗯", "明白", "收到")
+        if self._normalize_direct_query(query) in confirmation_queries:
+            return {
+                "reasoning": "用户只是确认或承接上一轮对话，属于普通对话，不需要调用外部搜索或规划智能体。",
+                "intents": [
+                    {
+                        "type": "conversation",
+                        "confidence": 1.0,
+                        "description": "确认回应",
+                        "reason": "用户发送简短确认。",
+                    }
+                ],
+                "key_entities": {},
+                "rewritten_query": query,
+                "direct_answer": "好的。你可以继续补充目的地、出发地、时间、天数、预算或偏好。",
+                "agent_schedule": [],
+            }
+
+        current_trip_constraints = self._try_current_trip_constraints(query)
+        if current_trip_constraints:
+            return current_trip_constraints
 
         memory_result = self._try_direct_memory_intent(query)
         if memory_result:
@@ -635,6 +759,120 @@ Priority 3:
                     "reason": "读取或更新用户长期偏好、历史行程和行为反馈",
                     "expected_output": "用户相关记忆或偏好处理结果",
                 }
+            ],
+        }
+
+    def _try_current_trip_constraints(self, query: str) -> Optional[Dict[str, Any]]:
+        constraint_words = (
+            "预算",
+            "经济型",
+            "舒适型",
+            "品质型",
+            "住宿",
+            "酒店",
+            "每晚",
+            "餐饮",
+            "吃饭",
+            "交通",
+            "节省",
+            "省钱",
+            "轻松",
+            "均衡",
+            "紧凑",
+            "节奏",
+        )
+        current_trip_markers = (
+            "本次行程",
+            "这次行程",
+            "此次行程",
+            "本次旅行",
+            "这次旅行",
+            "此次旅行",
+            "这趟",
+            "这一次",
+            "这次",
+        )
+        long_term_markers = ("以后", "长期", "平时", "通常", "一直", "默认", "记住")
+
+        if not any(word in query for word in constraint_words):
+            return None
+        if not any(marker in query for marker in current_trip_markers):
+            return None
+        if any(marker in query for marker in long_term_markers):
+            return None
+
+        key_entities: Dict[str, Any] = {"trip_scope": "current"}
+        if any(word in query for word in ("经济型", "省钱", "节省")):
+            key_entities["budget_level"] = "经济型"
+        elif "舒适型" in query:
+            key_entities["budget_level"] = "舒适型"
+        elif "品质型" in query:
+            key_entities["budget_level"] = "品质型"
+
+        lodging_range = re.search(
+            r"(?:住宿|酒店|每晚)[^0-9一二三四五六七八九十百千万]*(\d+)\s*(?:到|至|-|~|－|—)\s*(\d+)\s*元?",
+            query,
+        )
+        if lodging_range:
+            low = int(lodging_range.group(1))
+            high = int(lodging_range.group(2))
+            key_entities["lodging_budget_per_night_min"] = min(low, high)
+            key_entities["lodging_budget_per_night_max"] = max(low, high)
+        else:
+            lodging_budget = re.search(r"(?:住宿|酒店|每晚)[^0-9一二三四五六七八九十百千万]*(\d+)\s*元?(?:以内|以下|内)?", query)
+            if lodging_budget:
+                key_entities["lodging_budget_per_night"] = int(lodging_budget.group(1))
+                key_entities["lodging_budget_per_night_max"] = int(lodging_budget.group(1))
+
+        if any(word in query for word in ("轻松", "慢节奏")):
+            key_entities["pace_preference"] = "轻松"
+        elif "紧凑" in query:
+            key_entities["pace_preference"] = "紧凑"
+        elif "均衡" in query:
+            key_entities["pace_preference"] = "均衡"
+
+        if any(word in query for word in ("餐饮", "吃饭")) and any(word in query for word in ("节省", "省钱")):
+            key_entities["meal_budget_preference"] = "节省"
+        if "交通" in query and any(word in query for word in ("节省", "省钱")):
+            key_entities["transport_budget_preference"] = "节省"
+
+        return {
+            "reasoning": "用户明确在补充本次行程的预算、住宿、餐饮、交通或节奏约束，应作为当前行程规划字段处理，而不是外部信息查询。",
+            "intents": [
+                {
+                    "type": "plan",
+                    "confidence": 1.0,
+                    "description": "本次行程约束补充",
+                    "reason": "输入包含“本次/这次行程”等当前行程标记和预算/住宿/餐饮/交通/节奏约束。",
+                }
+            ],
+            "key_entities": key_entities,
+            "rewritten_query": query,
+            "agent_schedule": [
+                {
+                    "agent_name": "clarification",
+                    "priority": 1,
+                    "reason": "提取并合并本次行程的预算、住宿、餐饮、交通和节奏约束",
+                    "expected_output": "更新后的结构化行程字段",
+                },
+                {
+                    "agent_name": "search",
+                    "priority": 2,
+                    "reason": "在行程字段完整后检索符合预算约束的外部旅行信息",
+                    "expected_output": "目的地 POI、路线、天气和预算相关外部数据",
+                },
+                {
+                    "agent_name": "memory",
+                    "priority": 2,
+                    "reason": "读取用户已有偏好，辅助判断预算和节奏是否冲突",
+                    "expected_output": "用户偏好、历史行程和行为反馈",
+                },
+                {
+                    "agent_name": "plan",
+                    "priority": 3,
+                    "reason": "按最新预算和节省约束生成或调整行程计划",
+                    "expected_output": "符合约束的结构化旅行计划",
+                },
             ],
         }
 

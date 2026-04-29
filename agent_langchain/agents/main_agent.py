@@ -1,7 +1,8 @@
 """User-facing TravelFlow main agent.
 
-MainAgent owns the conversation turn. Intent recognition is an internal
-capability, and business-agent orchestration is an internal tool.
+MainAgent owns the whole turn: intent recognition, child-agent supervision,
+observation, stop/continue decisions, and final aggregation. Conversation
+persistence is handled by the entry layer and MemoryManager.
 """
 
 from __future__ import annotations
@@ -79,16 +80,166 @@ class MainAgent:
 
         self._emit_intention(intention_data)
 
-        if self.memory_manager and not state.get("_user_message_recorded"):
-            user_query = state.get("user_query")
-            if user_query:
-                self.memory_manager.add_message("user", str(user_query))
-                state["_user_message_recorded"] = True
-
         schedule = intention_data.get("agent_schedule") or []
         if schedule:
-            self._emit_event("🧩 主智能体正在按需调度业务智能体...")
+            self._emit_event("🧩 主智能体正在监督业务智能体执行...")
         else:
             self._emit_event("💬 主智能体直接回复当前问题...")
 
-        return await self.agent_scheduler.run(intention_state)
+        return await self._supervise_business_agents(intention_state)
+
+    async def _supervise_business_agents(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """Run child agents while MainAgent keeps ownership of the turn state."""
+
+        scheduler = self.agent_scheduler
+        graph_state = scheduler.create_orchestration_state(state)
+        graph_state.update(await scheduler.prepare(graph_state))
+
+        max_batches = 20
+        while scheduler.has_runnable_batches(graph_state):
+            current_index = graph_state.get("batch_index", 0)
+            graph_state.update(await scheduler.run_next_batch(graph_state))
+
+            decision = self._observe_after_batch(graph_state)
+            if decision == "stop":
+                break
+
+            if graph_state.get("batch_index", 0) == current_index:
+                logger.error("MainAgent supervisor made no progress at batch index %s", current_index)
+                break
+            max_batches -= 1
+            if max_batches <= 0:
+                logger.error("MainAgent supervisor stopped after too many batch iterations")
+                break
+
+        graph_state.update(await scheduler.aggregate(graph_state))
+        if graph_state.get("supervisor_decision") and isinstance(graph_state.get("final_result"), dict):
+            graph_state["final_result"]["supervisor_decision"] = graph_state["supervisor_decision"]
+        memory_policy = self._build_memory_policy(graph_state)
+        self._apply_memory_policy(graph_state.get("results", []), memory_policy)
+        if isinstance(graph_state.get("final_result"), dict):
+            graph_state["final_result"]["memory_policy"] = memory_policy
+
+        return {
+            **state,
+            "context": graph_state.get("context", {}),
+            "results": graph_state.get("results", []),
+            "final_result": graph_state.get("final_result", {"status": "error", "message": "Unknown error"}),
+        }
+
+    def _observe_after_batch(self, graph_state: Dict[str, Any]) -> str:
+        scheduler = self.agent_scheduler
+        blocking_reason = scheduler.get_blocking_reason(graph_state)
+        if blocking_reason:
+            self._handle_supervisor_blocking_decision(blocking_reason, graph_state)
+            scheduler.truncate_remaining_batches(graph_state)
+            return "stop"
+
+        if scheduler.has_runnable_batches(graph_state):
+            self._emit_event(
+                {
+                    "type": "chain",
+                    "stage": "supervisor_observation",
+                    "title": "主智能体决定继续执行",
+                    "message": "上一批智能体已完成，继续执行下一批任务。",
+                }
+            )
+            return "continue"
+
+        return "stop"
+
+    def _blocking_reason_message(self, reason: str) -> str:
+        return {
+            "clarification_missing_info": "事项信息不足，需要先等待用户补充。",
+            "search_failure": "外部检索失败，暂停规划以避免生成未核验方案。",
+            "memory_preference_gaps": "关键偏好缺失，需要先确认预算或节奏。",
+        }.get(reason, "当前结果不满足继续执行条件。")
+
+    def _handle_supervisor_blocking_decision(self, reason: str, graph_state: Dict[str, Any]):
+        """Own user-facing stop/ask decisions after child agents make suggestions."""
+
+        decision = {
+            "action": "ask_user" if reason in {"clarification_missing_info", "memory_preference_gaps"} else "stop",
+            "reason": reason,
+            "message": self._blocking_reason_message(reason),
+        }
+        graph_state["supervisor_decision"] = decision
+
+        if reason in {"clarification_missing_info", "memory_preference_gaps"}:
+            self._save_pending_plan(reason, graph_state)
+
+        self._emit_event(
+            {
+                "type": "chain",
+                "stage": "supervisor_decision",
+                "title": self._blocking_reason_title(reason),
+                "message": decision["message"],
+                "decision": decision,
+            }
+        )
+
+    def _save_pending_plan(self, reason: str, graph_state: Dict[str, Any]):
+        if not self.memory_manager:
+            return
+        query = graph_state.get("intention_data", {}).get("rewritten_query", "")
+        if not query:
+            return
+        self.memory_manager.short_term.set_pending_plan(query, {"reason": reason})
+
+    def _blocking_reason_title(self, reason: str) -> str:
+        return {
+            "clarification_missing_info": "主智能体决定追问缺失事项",
+            "search_failure": "主智能体决定暂停规划",
+            "memory_preference_gaps": "主智能体决定追问关键偏好",
+        }.get(reason, "主智能体决定暂停")
+
+    def _build_memory_policy(self, graph_state: Dict[str, Any]) -> Dict[str, Any]:
+        """Decide which memory writes are allowed for this supervised turn."""
+
+        decision = graph_state.get("supervisor_decision") if isinstance(graph_state.get("supervisor_decision"), dict) else {}
+        stop_reason = decision.get("reason")
+        results = graph_state.get("results", [])
+
+        has_completed_plan = any(
+            result.get("agent_name") in {"plan", "itinerary_planning"}
+            and isinstance(result.get("result"), dict)
+            and result.get("result", {}).get("status") == "success"
+            and isinstance(result.get("result", {}).get("data"), dict)
+            and bool(result.get("result", {}).get("data", {}).get("itinerary"))
+            for result in results
+            if isinstance(result, dict)
+        )
+
+        explicit_memory_update = any(
+            result.get("agent_name") in {"memory", "preference"}
+            and isinstance(result.get("result"), dict)
+            and isinstance(result.get("result", {}).get("data"), dict)
+            and bool(result.get("result", {}).get("data", {}).get("preferences"))
+            for result in results
+            if isinstance(result, dict)
+        )
+
+        allow_preference_writes = explicit_memory_update and stop_reason not in {"search_failure"}
+        allow_trip_history_writes = has_completed_plan and not stop_reason
+
+        return {
+            "owner": "MainAgent",
+            "allow_preference_writes": allow_preference_writes,
+            "allow_trip_history_writes": allow_trip_history_writes,
+            "clear_pending_plan_on_trip": allow_trip_history_writes,
+            "reason": stop_reason or "turn_completed",
+        }
+
+    def _apply_memory_policy(self, results: list, policy: Dict[str, Any]):
+        if not self.memory_manager or not hasattr(self.memory_manager, "apply_agent_results"):
+            return
+        self.memory_manager.apply_agent_results(results, policy=policy)
+        self._emit_event(
+            {
+                "type": "chain",
+                "stage": "memory_policy",
+                "title": "主智能体应用记忆策略",
+                "message": "已根据本轮状态决定是否写入长期偏好和历史行程。",
+                "policy": policy,
+            }
+        )

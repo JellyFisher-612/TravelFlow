@@ -1,7 +1,7 @@
-"""MainAgent 可调用的业务智能体编排工具。
+"""MainAgent 可调用的业务智能体执行工具。
 
-职责：根据 agent_schedule，基于 LangGraph 按 priority 分批调度业务智能体。
-同 priority 并行执行，不同 priority 串行执行。
+职责：根据 MainAgent 给出的任务批次执行业务智能体。
+同 priority 并行执行，不同 priority 由 MainAgent 监督推进。
 """
 
 from __future__ import annotations
@@ -25,7 +25,12 @@ class OrchestrationState(TypedDict):
 
 
 class AgentScheduler:
-    """业务智能体执行工具 - 通过 LangGraph 状态图调度多智能体。"""
+    """业务智能体执行工具。
+
+    MainAgent owns the turn-level supervision loop. This class prepares task
+    batches, executes child agents, exposes observation helpers, and aggregates
+    results. ``run`` remains as a compatibility wrapper for older callers.
+    """
 
     def __init__(
         self,
@@ -97,12 +102,48 @@ class AgentScheduler:
         return graph_builder.compile()
 
     async def run(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """Compatibility wrapper for callers that still invoke the executor directly."""
+
         intention_data = state.get("intention_data") or {}
         if not isinstance(intention_data, dict):
             return {**state, "final_result": {"error": "Invalid intention format"}}
 
-        initial_state: OrchestrationState = {
-            "intention_data": intention_data,
+        graph_state = self.create_orchestration_state(state)
+        graph_state.update(await self.prepare(graph_state))
+
+        if self.has_runnable_batches(graph_state):
+            max_batches = 20
+            while self.has_runnable_batches(graph_state):
+                current_index = graph_state.get("batch_index", 0)
+                graph_state.update(await self.run_next_batch(graph_state))
+                blocking_reason = self.get_blocking_reason(graph_state)
+                if blocking_reason:
+                    self.handle_blocking_reason(blocking_reason, graph_state)
+                    self.truncate_remaining_batches(graph_state)
+                    break
+                if graph_state.get("batch_index", 0) == current_index:
+                    logger.error("Scheduler made no progress at batch index %s", current_index)
+                    break
+                max_batches -= 1
+                if max_batches <= 0:
+                    logger.error("Scheduler stopped after too many batch iterations")
+                    break
+
+        graph_state.update(await self.aggregate(graph_state))
+        final_result = graph_state.get("final_result", {"status": "error", "message": "Unknown error"})
+
+        self.apply_memory_results(graph_state.get("results", []))
+
+        return {
+            **state,
+            "context": graph_state.get("context", {}),
+            "results": graph_state.get("results", []),
+            "final_result": final_result,
+        }
+
+    def create_orchestration_state(self, state: Dict[str, Any]) -> OrchestrationState:
+        return {
+            "intention_data": state.get("intention_data") or {},
             "context": state.get("context", {}),
             "batches": [],
             "batch_index": 0,
@@ -111,18 +152,40 @@ class AgentScheduler:
             "search_refinement_count": 0,
         }
 
-        graph_state = await self._graph.ainvoke(initial_state)
-        final_result = graph_state.get("final_result", {"status": "error", "message": "Unknown error"})
+    async def prepare(self, state: OrchestrationState) -> Dict[str, Any]:
+        return await self._prepare_node(state)
 
-        if self.memory_manager:
-            self._update_memory(intention_data, graph_state.get("results", []))
+    async def run_next_batch(self, state: OrchestrationState) -> Dict[str, Any]:
+        return await self._run_batch_node(state)
 
-        return {
-            **state,
-            "context": graph_state.get("context", {}),
-            "results": graph_state.get("results", []),
-            "final_result": final_result,
-        }
+    async def aggregate(self, state: OrchestrationState) -> Dict[str, Any]:
+        return await self._aggregate_node(state)
+
+    def has_runnable_batches(self, state: OrchestrationState) -> bool:
+        return bool(state.get("batches")) and state.get("batch_index", 0) < len(state.get("batches", []))
+
+    def get_blocking_reason(self, state: OrchestrationState) -> Optional[str]:
+        return self._get_blocking_reason(state)
+
+    def handle_blocking_reason(self, reason: str, state: OrchestrationState):
+        self._handle_blocking_reason(reason, state)
+
+    def truncate_remaining_batches(self, state: OrchestrationState):
+        batches = state.get("batches", [])
+        state["batches"] = batches[: state.get("batch_index", 0)]
+
+    def apply_memory_results(self, results: List[Dict[str, Any]]):
+        if self.memory_manager and hasattr(self.memory_manager, "apply_agent_results"):
+            self.memory_manager.apply_agent_results(
+                results,
+                policy={
+                    "owner": "AgentScheduler.compat",
+                    "allow_preference_writes": True,
+                    "allow_trip_history_writes": True,
+                    "clear_pending_plan_on_trip": True,
+                    "reason": "legacy_direct_scheduler_run",
+                },
+            )
 
     async def _prepare_node(self, state: OrchestrationState) -> Dict[str, Any]:
         intention_data = state["intention_data"]
@@ -271,13 +334,15 @@ class AgentScheduler:
                 }
             )
 
-        return {
+        next_state = {
             "context": next_context,
             "batches": next_batches,
             "results": combined_results,
             "batch_index": batch_index + 1,
             "search_refinement_count": next_context.get("search_refinement_count", refinement_count),
         }
+
+        return next_state
 
     async def _aggregate_node(self, state: OrchestrationState) -> Dict[str, Any]:
         existing = state.get("final_result") or {}
@@ -294,7 +359,26 @@ class AgentScheduler:
         return "run_batch" if state.get("batches") else "aggregate"
 
     def _route_after_batch(self, state: OrchestrationState) -> str:
+        blocking_reason = self._get_blocking_reason(state)
+        if blocking_reason:
+            self._handle_blocking_reason(blocking_reason, state)
+            self.truncate_remaining_batches(state)
+            return "aggregate"
+        if state.get("batch_index", 0) < len(state.get("batches", [])):
+            return "run_batch"
+        return "aggregate"
+
+    def _get_blocking_reason(self, state: OrchestrationState) -> Optional[str]:
         if self._has_blocking_missing_info(state):
+            return "clarification_missing_info"
+        if self._has_blocking_search_failure(state):
+            return "search_failure"
+        if self._has_blocking_memory_gaps(state):
+            return "memory_preference_gaps"
+        return None
+
+    def _handle_blocking_reason(self, reason: str, state: OrchestrationState):
+        if reason == "clarification_missing_info":
             if self.memory_manager:
                 query = state.get("intention_data", {}).get("rewritten_query", "")
                 if query:
@@ -310,8 +394,8 @@ class AgentScheduler:
                     "message": "事项收集发现关键信息不足，已停止后续检索和规划。",
                 }
             )
-            return "aggregate"
-        if self._has_blocking_search_failure(state):
+            return
+        if reason == "search_failure":
             self._emit_event(
                 {
                     "type": "chain",
@@ -320,8 +404,8 @@ class AgentScheduler:
                     "message": "信息检索未成功，已停止后续行程规划，避免生成不可靠结果。",
                 }
             )
-            return "aggregate"
-        if self._has_blocking_memory_gaps(state):
+            return
+        if reason == "memory_preference_gaps":
             if self.memory_manager:
                 query = state.get("intention_data", {}).get("rewritten_query", "")
                 if query:
@@ -337,10 +421,6 @@ class AgentScheduler:
                     "message": "记忆智能体发现预算或节奏偏好缺失，已停止后续行程规划。",
                 }
             )
-            return "aggregate"
-        if state.get("batch_index", 0) < len(state.get("batches", [])):
-            return "run_batch"
-        return "aggregate"
 
     def _extract_plan_search_requests(self, batch_results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         for result in reversed(batch_results):
@@ -749,6 +829,28 @@ class AgentScheduler:
             return {"field": "origin", "label": "出发地", "type": "text", "placeholder": "例如：成都"}
         if field == "destination":
             return {"field": "destination", "label": "目的地", "type": "text", "placeholder": "例如：北京"}
+        if field == "budget_level":
+            return {
+                "field": "budget_level",
+                "label": "预算档位",
+                "type": "select",
+                "options": [
+                    {"label": "经济型", "value": "经济型"},
+                    {"label": "舒适型", "value": "舒适型"},
+                    {"label": "品质型", "value": "品质型"},
+                ],
+            }
+        if field == "pace_preference":
+            return {
+                "field": "pace_preference",
+                "label": "行程节奏",
+                "type": "select",
+                "options": [
+                    {"label": "轻松", "value": "轻松"},
+                    {"label": "均衡", "value": "均衡"},
+                    {"label": "紧凑", "value": "紧凑"},
+                ],
+            }
         return None
 
     def _display_agent_name(self, agent_name: str) -> str:
@@ -804,70 +906,6 @@ class AgentScheduler:
             return "已查询长期记忆"
 
         return "已返回执行结果"
-
-    def _update_memory(self, intention_data: Dict[str, Any], results: List[Dict[str, Any]]):
-        if not self.memory_manager:
-            return
-
-        for result in results:
-            agent_name = result["agent_name"]
-            data = result["result"].get("data", {})
-
-            if agent_name in {"memory", "preference"} and isinstance(data, dict):
-                preferences_data = data.get("preferences", {})
-                if isinstance(preferences_data, list):
-                    for pref_item in preferences_data:
-                        if not isinstance(pref_item, dict):
-                            continue
-
-                        pref_type = pref_item.get("type")
-                        pref_value = pref_item.get("value")
-                        pref_action = pref_item.get("action", "replace")
-
-                        if not pref_type or not pref_value:
-                            continue
-
-                        if pref_action == "append":
-                            current_prefs = self.memory_manager.long_term.get_preference()
-                            existing_value = current_prefs.get(pref_type)
-                            if isinstance(existing_value, list):
-                                if pref_value not in existing_value:
-                                    existing_value.append(pref_value)
-                                self.memory_manager.long_term.save_preference(pref_type, existing_value)
-                            else:
-                                new_list = [existing_value, pref_value] if existing_value else [pref_value]
-                                self.memory_manager.long_term.save_preference(pref_type, new_list)
-                        else:
-                            self.memory_manager.long_term.save_preference(pref_type, pref_value)
-                elif isinstance(preferences_data, dict):
-                    for pref_type, value in preferences_data.items():
-                        if value and pref_type != "has_preferences" and pref_type != "error":
-                            self.memory_manager.long_term.save_preference(pref_type, value)
-
-            if agent_name in {"plan", "itinerary_planning"} and isinstance(data, dict):
-                itinerary = data.get("itinerary", {})
-                if itinerary:
-                    event_data = {}
-                    for r in results:
-                        if r["agent_name"] in {"clarification", "event_collection"}:
-                            event_data = r["result"].get("data", {})
-                            break
-
-                    destination = event_data.get("destination")
-                    if destination:
-                        self.memory_manager.long_term.save_trip_history(
-                            {
-                                "origin": event_data.get("origin"),
-                                "destination": destination,
-                                "start_date": event_data.get("start_date"),
-                                "end_date": event_data.get("end_date"),
-                                "purpose": event_data.get("trip_purpose", "旅游"),
-                            }
-                        )
-                        self.memory_manager.short_term.clear_pending_plan()
-
-        logger.info("Memory updated after orchestration")
-
 
 # Backward compatibility: older code/tests may still import OrchestrationAgent.
 OrchestrationAgent = AgentScheduler

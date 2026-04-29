@@ -101,9 +101,12 @@ class TrainService:
         from_station: str,
         to_station: str,
         train_filter_flags: str = "",
+        earliest_start_time: int | None = None,
+        latest_start_time: int | None = None,
         sort_flag: str = "",
         sort_reverse: bool = False,
         limited_num: int = 10,
+        response_format: str = "json",
     ) -> Any:
         """Query tickets by date and station names.
 
@@ -117,8 +120,11 @@ class TrainService:
                 "fromStation": from_station,
                 "toStation": to_station,
                 "trainFilterFlags": train_filter_flags,
+                "earliestStartTime": earliest_start_time,
+                "latestStartTime": latest_start_time,
                 "sortFlag": sort_flag,
                 "sortReverse": sort_reverse,
                 "limitedNum": limited_num,
+                "format": response_format,
             },
         )

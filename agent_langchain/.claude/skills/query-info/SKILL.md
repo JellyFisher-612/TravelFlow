@@ -55,12 +55,17 @@ description: TravelFlow Search Agent skill. Use it when the system needs externa
 
 ## 行程检索设计
 
-行程规划场景下，Search Agent 会先生成 `search_plan`，再调用垂直工具，最后返回 `search_bundle`：
+行程规划场景下，Search Agent 会先生成需求感知的 `search_plan`，再调用垂直工具，最后返回 `search_bundle`。搜索计划分三步：
+
+1. 规则画像：根据用户原始需求、`event_data` 和规划智能体追加请求识别亲子、美食、小众、摄影、长辈友好、雨天备选、预算、门票预约等搜索重点。
+2. 计划补充：在基础地理编码、天气、POI、交通任务之上追加高价值的 POI 或网页检索任务；有 LLM 时会尝试进一步补充，失败时退回规则计划。
+3. 质量评估：输出必须核验项、阻断性缺失和非阻断缺口，要求门票、预约、开放时间、余票、票价、酒店库存等硬约束优先使用官方或准官方来源。
 
 - `transport.outbound_trains` / `transport.return_trains`：12306 MCP 查询出的去程和返程车次、时间、余票和价格。
 - `destination.pois` / `pois_by_category`：高德 MCP 查询出的景点、餐饮、住宿、交通枢纽等 POI。
 - `destination.nearby`：围绕核心景点查询周边酒店、餐饮和站点。
 - `destination.routes` / `distances`：核心 POI 之间的步行、驾车路线和距离。
-- `quality.verified_fields` / `missing` / `warnings`：说明哪些硬约束已核验，哪些仍缺失或失败。
+- `planning.search_strategy` / `demand_profile` / `must_verify`：说明为什么这么搜，以及哪些事实必须核验。
+- `quality.verified_fields` / `missing` / `warnings` / `unverified_must_verify`：说明哪些硬约束已核验，哪些仍缺失或失败。
 
 为了兼容旧版 Plan Agent，Search Agent 仍会在 `results` 顶层保留 `pois`、`weather`、`routes`、`distances` 等字段。

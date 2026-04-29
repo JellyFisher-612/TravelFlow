@@ -56,6 +56,114 @@ class MemoryManager:
         # 同时添加到长期记忆（跨会话持久化）
         self.long_term.add_chat_message(role, content, self.session_id, metadata)
 
+    def apply_agent_results(self, results: List[Dict[str, Any]], policy: Dict[str, Any] = None):
+        """
+        Apply structured memory updates approved by the supervisor.
+
+        Memory-capable agents may extract preferences or detect conflicts, but
+        the caller supplies policy so long-term writes remain under global
+        conversation control.
+        """
+        policy = policy or {}
+        allow_preference_writes = bool(policy.get("allow_preference_writes", True))
+        allow_trip_history_writes = bool(policy.get("allow_trip_history_writes", True))
+        clear_pending_plan_on_trip = bool(policy.get("clear_pending_plan_on_trip", True))
+
+        if not results:
+            return
+
+        for result in results:
+            if not isinstance(result, dict):
+                continue
+
+            agent_name = result.get("agent_name")
+            data = self._extract_result_data(result)
+
+            if allow_preference_writes and agent_name in {"memory", "preference"} and isinstance(data, dict):
+                self._apply_preferences(data.get("preferences", {}))
+
+            if allow_trip_history_writes and agent_name in {"plan", "itinerary_planning"} and isinstance(data, dict):
+                self._apply_trip_history(
+                    data,
+                    results,
+                    clear_pending_plan=clear_pending_plan_on_trip,
+                )
+
+    def _extract_result_data(self, result: Dict[str, Any]) -> Dict[str, Any]:
+        wrapped = result.get("result", {})
+        if isinstance(wrapped, dict) and isinstance(wrapped.get("data"), dict):
+            return wrapped["data"]
+        if isinstance(result.get("data"), dict):
+            return result["data"]
+        return {}
+
+    def _apply_preferences(self, preferences_data: Any):
+        if isinstance(preferences_data, list):
+            for pref_item in preferences_data:
+                if not isinstance(pref_item, dict):
+                    continue
+                pref_type = pref_item.get("type")
+                pref_value = pref_item.get("value")
+                pref_action = pref_item.get("action", "replace")
+                if not pref_type or not pref_value:
+                    continue
+                self._save_preference_item(pref_type, pref_value, pref_action)
+            return
+
+        if isinstance(preferences_data, dict):
+            for pref_type, value in preferences_data.items():
+                if value and pref_type not in {"has_preferences", "error"}:
+                    self.long_term.save_preference(pref_type, value)
+
+    def _save_preference_item(self, pref_type: str, pref_value: Any, pref_action: str):
+        if pref_action == "append":
+            current_prefs = self.long_term.get_preference()
+            existing_value = current_prefs.get(pref_type) if isinstance(current_prefs, dict) else None
+            if isinstance(existing_value, list):
+                if pref_value not in existing_value:
+                    existing_value.append(pref_value)
+                self.long_term.save_preference(pref_type, existing_value)
+                return
+
+            new_list = [existing_value, pref_value] if existing_value else [pref_value]
+            self.long_term.save_preference(pref_type, new_list)
+            return
+
+        self.long_term.save_preference(pref_type, pref_value)
+
+    def _apply_trip_history(
+        self,
+        plan_data: Dict[str, Any],
+        results: List[Dict[str, Any]],
+        clear_pending_plan: bool = True,
+    ):
+        if not plan_data.get("itinerary"):
+            return
+
+        event_data = {}
+        for result in results:
+            if result.get("agent_name") in {"clarification", "event_collection"}:
+                candidate = self._extract_result_data(result)
+                if isinstance(candidate, dict):
+                    event_data = candidate
+                break
+
+        destination = event_data.get("destination")
+        if not destination:
+            return
+
+        self.long_term.save_trip_history(
+            {
+                "origin": event_data.get("origin"),
+                "destination": destination,
+                "start_date": event_data.get("start_date"),
+                "end_date": event_data.get("end_date"),
+                "purpose": event_data.get("trip_purpose", "旅游"),
+            }
+        )
+        if clear_pending_plan:
+            self.short_term.clear_pending_plan()
+
     # ========== 长期记忆操作 ==========
     # 注意：大部分方法直接使用 self.short_term 和 self.long_term 即可，无需封装
 

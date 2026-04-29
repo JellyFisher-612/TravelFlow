@@ -8,6 +8,7 @@ import asyncio
 import sys
 import os
 import io
+import re
 from typing import Optional
 
 # 添加项目根目录到路径
@@ -209,8 +210,12 @@ class TravelFlowCLI:
         max_retries = rc.get("max_retries", 3)
 
         # 1. 获取长期记忆摘要与上下文
-        self._emit_runtime_event("正在读取会话上下文和长期记忆...")
-        long_term_summary = await self._get_long_term_summary(user_input)
+        long_term_summary = ""
+        if self._should_skip_long_term_summary(user_input):
+            self._emit_runtime_event("当前是普通对话，跳过长期记忆摘要。")
+        else:
+            self._emit_runtime_event("正在读取会话上下文和长期记忆...")
+            long_term_summary = await self._get_long_term_summary(user_input)
         recent_context = self.memory_manager.short_term.get_recent_context(n_turns=5)
         context_messages = []
         if long_term_summary:
@@ -228,6 +233,11 @@ class TravelFlowCLI:
             "context": {},
             "results": [],
         }
+
+        # The entry layer owns turn-level chat persistence. MainAgent only
+        # understands and delegates the request.
+        self.memory_manager.add_message("user", user_input)
+        shared_state["_user_message_recorded"] = True
 
         # 2. 主智能体处理当前用户回合：理解需求，直接回复或委托业务智能体。
         try:
@@ -261,6 +271,45 @@ class TravelFlowCLI:
         )
         self._emit_runtime_event("✅ 结果已生成")
         return result_data, None
+
+    def _should_skip_long_term_summary(self, user_input: str) -> bool:
+        """Avoid unnecessary LLM summarization for short meta/chat turns."""
+        query = (user_input or "").strip().lower()
+        if not query:
+            return True
+        if any(phrase in query for phrase in ("我是谁", "知道我是谁", "认识我")):
+            return False
+        normalized = re.sub(r"[\s\ufeff\u200b]+", "", query)
+        normalized = re.sub(r"[。！？!?，,、；;：:\"'“”‘’（）()\[\]{}<>《》~～.]+$", "", normalized)
+        normalized = re.sub(r"^[。！？!?，,、；;：:\"'“”‘’（）()\[\]{}<>《》~～.]+", "", normalized)
+        exact_meta = {
+            "你好",
+            "您好",
+            "hello",
+            "hi",
+            "嗨",
+            "你是谁",
+            "你是啥",
+            "你叫什么",
+            "你叫什么名字",
+            "你是什么",
+            "你能做什么",
+            "你会做什么",
+            "你可以做什么",
+            "你有什么功能",
+            "怎么用",
+        }
+        if normalized in exact_meta:
+            return True
+        return any(
+            phrase in query
+            for phrase in (
+                "介绍一下你自己",
+                "你是一个什么",
+                "你是干什么的",
+                "这个系统怎么用",
+            )
+        )
 
     def _emit_intention_chain(self, intention_data: dict):
         """Emit user-facing orchestration reasoning without exposing hidden chain-of-thought."""

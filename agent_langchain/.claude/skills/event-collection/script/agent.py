@@ -39,6 +39,11 @@ class EventCollectionOutput(BaseModel):
     end_date: Optional[str] = Field(default=None)
     duration_days: Optional[int] = Field(default=None)
     budget_level: Optional[str] = Field(default=None)
+    lodging_budget_per_night: Optional[int] = Field(default=None)
+    lodging_budget_per_night_min: Optional[int] = Field(default=None)
+    lodging_budget_per_night_max: Optional[int] = Field(default=None)
+    meal_budget_preference: Optional[str] = Field(default=None)
+    transport_budget_preference: Optional[str] = Field(default=None)
     pace_preference: Optional[str] = Field(default=None)
     return_location: Optional[str] = Field(default=None)
     trip_purpose: Optional[str] = Field(default=None)
@@ -232,9 +237,25 @@ class EventCollectionAgent:
             trip_purpose = "出差"
 
         budget_level = self._extract_budget_level(query)
+        lodging_budget = self._extract_lodging_budget(query)
+        meal_budget_preference = self._extract_meal_budget_preference(query)
+        transport_budget_preference = self._extract_transport_budget_preference(query)
         pace_preference = self._extract_pace_preference(query)
 
-        if not any([origin, destination, start_date, duration_days, trip_purpose]):
+        if not any(
+            [
+                origin,
+                destination,
+                start_date,
+                duration_days,
+                trip_purpose,
+                budget_level,
+                lodging_budget,
+                meal_budget_preference,
+                transport_budget_preference,
+                pace_preference,
+            ]
+        ):
             return None
 
         if not origin and isinstance(user_preferences, dict):
@@ -251,6 +272,11 @@ class EventCollectionAgent:
             "end_date": end_date,
             "duration_days": duration_days,
             "budget_level": budget_level,
+            "lodging_budget_per_night": lodging_budget.get("value") if lodging_budget else None,
+            "lodging_budget_per_night_min": lodging_budget.get("min") if lodging_budget else None,
+            "lodging_budget_per_night_max": lodging_budget.get("max") if lodging_budget else None,
+            "meal_budget_preference": meal_budget_preference,
+            "transport_budget_preference": transport_budget_preference,
             "pace_preference": pace_preference,
             "return_location": origin,
             "trip_purpose": trip_purpose,
@@ -271,6 +297,15 @@ class EventCollectionAgent:
             summary_parts.append(f"行程{duration_days}天")
         if budget_level:
             summary_parts.append(f"预算为{budget_level}")
+        if lodging_budget:
+            if lodging_budget.get("min") is not None and lodging_budget.get("max") is not None:
+                summary_parts.append(f"住宿每晚{lodging_budget['min']}到{lodging_budget['max']}元")
+            elif lodging_budget.get("max") is not None:
+                summary_parts.append(f"住宿每晚{lodging_budget['max']}元以内")
+        if meal_budget_preference:
+            summary_parts.append(f"餐饮{meal_budget_preference}")
+        if transport_budget_preference:
+            summary_parts.append(f"交通{transport_budget_preference}")
         if pace_preference:
             summary_parts.append(f"节奏为{pace_preference}")
 
@@ -299,6 +334,37 @@ class EventCollectionAgent:
             return "舒适型"
         if any(word in query for word in ("品质", "高端", "600元以上", "不差钱")):
             return "品质型"
+        return None
+
+    def _extract_lodging_budget(self, query: str) -> Optional[Dict[str, int]]:
+        range_match = re.search(
+            r"(?:住宿|酒店|每晚)[^0-9一二三四五六七八九十百千万]*(\d+)\s*(?:到|至|-|~|－|—)\s*(\d+)\s*元?",
+            query,
+        )
+        if range_match:
+            low = int(range_match.group(1))
+            high = int(range_match.group(2))
+            return {"min": min(low, high), "max": max(low, high)}
+
+        max_match = re.search(r"(?:住宿|酒店|每晚)[^0-9一二三四五六七八九十百千万]*(\d+)\s*元?(?:以内|以下|内)", query)
+        if max_match:
+            value = int(max_match.group(1))
+            return {"value": value, "max": value}
+
+        min_match = re.search(r"(?:住宿|酒店|每晚)[^0-9一二三四五六七八九十百千万]*(\d+)\s*元?(?:以上|起)", query)
+        if min_match:
+            return {"min": int(min_match.group(1))}
+
+        return None
+
+    def _extract_meal_budget_preference(self, query: str) -> Optional[str]:
+        if any(word in query for word in ("餐饮", "吃饭", "美食")) and any(word in query for word in ("节省", "省钱", "性价比")):
+            return "节省" if any(word in query for word in ("节省", "省钱")) else "性价比"
+        return None
+
+    def _extract_transport_budget_preference(self, query: str) -> Optional[str]:
+        if "交通" in query and any(word in query for word in ("节省", "省钱", "性价比")):
+            return "节省" if any(word in query for word in ("节省", "省钱")) else "性价比"
         return None
 
     def _extract_pace_preference(self, query: str) -> Optional[str]:

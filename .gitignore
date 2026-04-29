@@ -1,0 +1,5 @@
+.codex-loop/current_prompt.md
+.codex-loop/logs/
+
+__pycache__/
+*.py[cod]

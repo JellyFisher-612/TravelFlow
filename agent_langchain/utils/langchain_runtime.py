@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List
 
+import httpx
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
@@ -13,14 +14,17 @@ from config import LLM_CONFIG, SYSTEM_CONFIG
 def build_chat_model() -> ChatOpenAI:
     """Create the shared LangChain chat model used by all agents."""
 
+    timeout = float(SYSTEM_CONFIG.get("timeout", 60))
     return ChatOpenAI(
         model=LLM_CONFIG["model_name"],
         api_key=LLM_CONFIG["api_key"],
         base_url=LLM_CONFIG["base_url"],
-        timeout=float(SYSTEM_CONFIG.get("timeout", 60)),
+        timeout=timeout,
         temperature=LLM_CONFIG.get("temperature", 0.7),
         max_tokens=LLM_CONFIG.get("max_tokens", 2000),
         streaming=False,
+        http_client=httpx.Client(timeout=timeout, trust_env=False),
+        http_async_client=httpx.AsyncClient(timeout=timeout, trust_env=False),
     )
 
 
