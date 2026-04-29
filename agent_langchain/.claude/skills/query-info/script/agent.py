@@ -998,8 +998,8 @@ class InformationQueryAgent:
                     to_station=params["to_station"],
                     train_filter_flags=self._train_filter_flags(user_query or "高铁"),
                     sort_flag="startTime",
-                    sort_reverse=False,
-                    limited_num=20,
+                    sort_reverse=task.get("direction") == "return",
+                    limited_num=80,
                 )
                 tickets = self._normalize_train_tickets(raw)
                 selected = self._select_time_fit_trains(tickets, task.get("time_window"))
