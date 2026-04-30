@@ -80,7 +80,7 @@ class MemoryManager:
             data = self._extract_result_data(result)
 
             if allow_preference_writes and agent_name in {"memory", "preference"} and isinstance(data, dict):
-                self._apply_preferences(data.get("preferences", {}))
+                self._apply_preferences(data.get("preferences", {}), policy=policy, result_data=data)
 
             if allow_trip_history_writes and agent_name in {"plan", "itinerary_planning"} and isinstance(data, dict):
                 self._apply_trip_history(
@@ -97,7 +97,14 @@ class MemoryManager:
             return result["data"]
         return {}
 
-    def _apply_preferences(self, preferences_data: Any):
+    def _apply_preferences(
+        self,
+        preferences_data: Any,
+        policy: Dict[str, Any] = None,
+        result_data: Dict[str, Any] = None,
+    ):
+        policy = policy or {}
+        result_data = result_data or {}
         if isinstance(preferences_data, list):
             for pref_item in preferences_data:
                 if not isinstance(pref_item, dict):
@@ -107,29 +114,87 @@ class MemoryManager:
                 pref_action = pref_item.get("action", "replace")
                 if not pref_type or not pref_value:
                     continue
-                self._save_preference_item(pref_type, pref_value, pref_action)
+                self._save_preference_item(
+                    pref_type,
+                    pref_value,
+                    pref_action,
+                    metadata=self._build_preference_metadata(pref_item, policy, result_data),
+                )
             return
 
         if isinstance(preferences_data, dict):
             for pref_type, value in preferences_data.items():
                 if value and pref_type not in {"has_preferences", "error"}:
-                    self.long_term.save_preference(pref_type, value)
+                    self._save_preference_record(
+                        pref_type,
+                        value,
+                        metadata=self._build_preference_metadata({}, policy, result_data),
+                    )
 
-    def _save_preference_item(self, pref_type: str, pref_value: Any, pref_action: str):
+    def _build_preference_metadata(
+        self,
+        pref_item: Dict[str, Any],
+        policy: Dict[str, Any],
+        result_data: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        source = pref_item.get("source") if isinstance(pref_item.get("source"), dict) else {}
+        if not source:
+            source = {
+                "session_id": getattr(self, "session_id", None),
+                "owner": policy.get("owner"),
+                "reason": policy.get("reason"),
+            }
+            if pref_item.get("quote"):
+                source["quote"] = pref_item.get("quote")
+            elif result_data.get("summary"):
+                source["quote"] = result_data.get("summary")
+            source = {key: value for key, value in source.items() if value is not None}
+
+        return {
+            "source": source,
+            "confidence": pref_item.get("confidence", result_data.get("confidence", 1.0)),
+            "scope": pref_item.get("scope", "global"),
+            "status": pref_item.get("status", "active"),
+            "owner": policy.get("owner"),
+            "reason": policy.get("reason"),
+            "session_id": getattr(self, "session_id", None),
+        }
+
+    def _save_preference_item(
+        self,
+        pref_type: str,
+        pref_value: Any,
+        pref_action: str,
+        metadata: Dict[str, Any] = None,
+    ):
         if pref_action == "append":
             current_prefs = self.long_term.get_preference()
             existing_value = current_prefs.get(pref_type) if isinstance(current_prefs, dict) else None
             if isinstance(existing_value, list):
                 if pref_value not in existing_value:
                     existing_value.append(pref_value)
-                self.long_term.save_preference(pref_type, existing_value)
+                self._save_preference_record(pref_type, existing_value, metadata=metadata, action=pref_action)
                 return
 
             new_list = [existing_value, pref_value] if existing_value else [pref_value]
-            self.long_term.save_preference(pref_type, new_list)
+            self._save_preference_record(pref_type, new_list, metadata=metadata, action=pref_action)
             return
 
-        self.long_term.save_preference(pref_type, pref_value)
+        self._save_preference_record(pref_type, pref_value, metadata=metadata, action=pref_action)
+
+    def _save_preference_record(
+        self,
+        pref_type: str,
+        value: Any,
+        metadata: Dict[str, Any] = None,
+        action: str = "replace",
+    ):
+        try:
+            self.long_term.save_preference(pref_type, value, metadata=metadata, action=action)
+        except TypeError:
+            # Older test doubles or integrations may still expose the legacy
+            # two-argument API. Keep the manager backward-compatible.
+            self.long_term.save_preference(pref_type, value)
 
     def _apply_trip_history(
         self,
@@ -190,6 +255,157 @@ class MemoryManager:
                 "statistics": self.long_term.get_statistics()
             }
         }
+
+    def get_runtime_context(
+        self,
+        recent_turns: int = 3,
+        trip_limit: int = 20,
+        feedback_limit: int = 20,
+    ) -> Dict[str, Any]:
+        """
+        Build a bounded memory snapshot for MainAgent-driven orchestration.
+
+        MainAgent decides when memory is needed; MemoryManager owns what memory
+        is exposed and how it is shaped for downstream agents.
+        """
+        context: Dict[str, Any] = {}
+
+        try:
+            context["recent_dialogue"] = self.short_term.get_recent_context(recent_turns)
+        except Exception:
+            logger.debug("Failed to read short-term memory context", exc_info=True)
+
+        try:
+            if hasattr(self.short_term, "get_working_state"):
+                context["working_state"] = self.short_term.get_working_state().get("state", {})
+        except Exception:
+            logger.debug("Failed to read working memory state", exc_info=True)
+
+        try:
+            context["user_preferences"] = self.long_term.get_preference()
+            if hasattr(self.long_term, "get_preference_records"):
+                context["user_profile_records"] = self.long_term.get_preference_records()
+        except Exception:
+            logger.debug("Failed to read user preferences", exc_info=True)
+
+        try:
+            context["trip_history"] = self.long_term.get_trip_history(limit=trip_limit)
+        except Exception:
+            logger.debug("Failed to read trip history", exc_info=True)
+
+        try:
+            context["behavior_feedback"] = self.long_term.get_behavior_feedback(limit=feedback_limit)
+        except Exception:
+            logger.debug("Failed to read behavior feedback", exc_info=True)
+
+        return {key: value for key, value in context.items() if value not in (None, "")}
+
+    def update_working_state(self, patch: Dict[str, Any]):
+        if hasattr(self.short_term, "update_working_state"):
+            self.short_term.update_working_state(patch)
+
+    def get_working_state(self) -> Dict[str, Any]:
+        if hasattr(self.short_term, "get_working_state"):
+            payload = self.short_term.get_working_state()
+            return payload.get("state", {}) if isinstance(payload.get("state"), dict) else {}
+        return {}
+
+    def clear_working_state(self):
+        if hasattr(self.short_term, "clear_working_state"):
+            self.short_term.clear_working_state()
+
+    def query_memory(self, query: str, context: Dict[str, Any] = None) -> Dict[str, Any]:
+        """
+        Answer an explicit personal-memory query without giving MainAgent
+        direct ownership of memory state or formatting rules.
+        """
+        context = context or self.get_runtime_context()
+        prefs = context.get("user_preferences") or {}
+        trips = context.get("trip_history") or []
+        feedback = context.get("behavior_feedback") or []
+
+        if any(word in (query or "") for word in ("我是谁", "知道我是谁", "认识我")):
+            known = []
+            if isinstance(prefs, dict) and (prefs.get("name") or prefs.get("nickname")):
+                known.append(f"你的称呼是{prefs.get('name') or prefs.get('nickname')}")
+            else:
+                known.append("我目前不知道你的姓名或真实身份")
+            if isinstance(prefs, dict) and prefs.get("home_location"):
+                known.append(f"你常从{prefs['home_location']}出发")
+            destinations = self._recent_destinations(trips)
+            if destinations:
+                known.append(f"你近期关注或规划过这些目的地：{'、'.join(destinations[:5])}")
+            return {
+                "query": query,
+                "answer": "；".join(known) + "。如果你愿意，可以告诉我你的名字或称呼，我会记住。",
+                "preferences": prefs,
+                "trip_history": trips[:5] if isinstance(trips, list) else [],
+                "behavior_feedback": feedback[:5] if isinstance(feedback, list) else [],
+            }
+
+        answer_parts = []
+        if isinstance(prefs, dict) and any(prefs.values()):
+            pref_lines = [f"{key}: {value}" for key, value in prefs.items() if value]
+            if pref_lines:
+                answer_parts.append("已记录偏好：" + "；".join(pref_lines))
+        if isinstance(trips, list) and trips:
+            trip_lines = []
+            for trip in trips[:5]:
+                if not isinstance(trip, dict):
+                    continue
+                origin = trip.get("origin") or "未知出发地"
+                destination = trip.get("destination") or "未知目的地"
+                start = trip.get("start_date") or ""
+                trip_lines.append(f"{origin}到{destination}{f'（{start}）' if start else ''}")
+            if trip_lines:
+                answer_parts.append("近期行程：" + "；".join(trip_lines))
+        if isinstance(feedback, list) and feedback:
+            feedback_lines = [
+                str(item.get("feedback", item))
+                for item in feedback[:5]
+                if isinstance(item, dict)
+            ]
+            if feedback_lines:
+                answer_parts.append("行为反馈：" + "；".join(feedback_lines))
+
+        return {
+            "query": query,
+            "answer": "；".join(answer_parts) if answer_parts else "目前没有找到相关的长期记忆。",
+            "preferences": prefs,
+            "trip_history": trips[:5] if isinstance(trips, list) else [],
+            "behavior_feedback": feedback[:5] if isinstance(feedback, list) else [],
+        }
+
+    def is_explicit_preference_update_result(self, result: Dict[str, Any]) -> bool:
+        """
+        Decide whether an agent result is a preference-update candidate.
+
+        Query responses may include a preferences snapshot; those must not be
+        treated as writes.
+        """
+        if not isinstance(result, dict) or result.get("agent_name") not in {"memory", "preference"}:
+            return False
+        data = self._extract_result_data(result)
+        if not isinstance(data, dict):
+            return False
+        preferences = data.get("preferences")
+        if not preferences:
+            return False
+        if data.get("has_preferences") is True:
+            return True
+        return isinstance(preferences, list)
+
+    def _recent_destinations(self, trips: Any) -> List[str]:
+        if not isinstance(trips, list):
+            return []
+        destinations = []
+        for trip in trips[-5:]:
+            if not isinstance(trip, dict):
+                continue
+            dest = trip.get("destination")
+            if dest and dest not in destinations:
+                destinations.append(dest)
+        return destinations
 
     def get_context_for_agent(self, long_term_summary: str = None) -> str:
         """

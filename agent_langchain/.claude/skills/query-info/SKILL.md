@@ -3,9 +3,9 @@ name: query-info
 description: TravelFlow Search Agent skill. Use it when the system needs external travel data such as POI, weather, geocoding, reverse geocoding, or route planning. It maps to the canonical agent name `search`.
 ---
 
-# Search Agent Skill
+# Search Agent Capability
 
-该 Skill 是 TravelFlow 信息检索智能体的底层实现，对外调度名为 `search`。
+该文件只描述 TravelFlow 信息检索能力。运行入口位于 `agents.search_agent.InformationQueryAgent`，对外调度名为 `search`；内部按铁路、天气、网页兜底、行程检索规划和执行拆在 `agents.search_modules`。旧路径 `query-info/script/agent.py` 仅做兼容导入。
 
 ## 能力
 

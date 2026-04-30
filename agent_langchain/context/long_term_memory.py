@@ -189,6 +189,9 @@ class LongTermMemory:
     def _pref_cache_key(self) -> str:
         return f"travelflow:pref:{self.user_id}"
 
+    def _pref_records_cache_key(self) -> str:
+        return f"travelflow:pref_records:{self.user_id}"
+
     def _session_meta_cache_key(self) -> str:
         return f"travelflow:smeta:{self.user_id}"
 
@@ -221,7 +224,23 @@ class LongTermMemory:
 
     # ------------------------- preference -------------------------
 
-    def save_preference(self, pref_type: str, value: Any):
+    def save_preference(
+        self,
+        pref_type: str,
+        value: Any,
+        metadata: Dict[str, Any] = None,
+        action: str = "replace",
+    ):
+        metadata = metadata or {}
+        existing_record = self.get_preference_record(pref_type)
+        record = self._build_preference_record(
+            pref_type=pref_type,
+            value=value,
+            metadata=metadata,
+            action=action,
+            existing_record=existing_record,
+        )
+
         if self._pg:
             with self._pg.cursor() as cur:
                 cur.execute(
@@ -231,20 +250,22 @@ class LongTermMemory:
                     ON CONFLICT (user_id, pref_type)
                     DO UPDATE SET pref_value = EXCLUDED.pref_value, updated_at = NOW()
                     """,
-                    (self.user_id, pref_type, json.dumps(value, ensure_ascii=False)),
+                    (self.user_id, pref_type, json.dumps(record, ensure_ascii=False)),
                 )
             self._cache_delete(self._pref_cache_key())
+            self._cache_delete(self._pref_records_cache_key())
             return
 
         prefs = self._json_data["preferences"]
         found = False
         for pref in prefs:
             if pref.get("type") == pref_type:
-                pref["value"] = value
+                pref.clear()
+                pref.update(record)
                 found = True
                 break
         if not found:
-            prefs.append({"type": pref_type, "value": value})
+            prefs.append(record)
         self._save_json()
 
     def get_preference(self, pref_type: str = None) -> Any:
@@ -259,17 +280,144 @@ class LongTermMemory:
                     rows = cur.fetchall()
                 cache = {}
                 for ptype, pvalue in rows:
-                    cache[ptype] = pvalue
+                    cache[ptype] = self._preference_value(pvalue)
                 self._cache_set_json(self._pref_cache_key(), cache)
             return cache.get(pref_type) if pref_type else cache
 
         prefs = self._json_data["preferences"]
         if pref_type is None:
-            return {p.get("type"): p.get("value") for p in prefs}
+            return {
+                p.get("type"): self._preference_value(p)
+                for p in prefs
+                if self._preference_status(p) == "active"
+            }
         for p in prefs:
-            if p.get("type") == pref_type:
-                return p.get("value")
+            if p.get("type") == pref_type and self._preference_status(p) == "active":
+                return self._preference_value(p)
         return None
+
+    def get_preference_record(self, pref_type: str) -> Optional[Dict[str, Any]]:
+        records = self.get_preference_records()
+        return records.get(pref_type)
+
+    def get_preference_records(self, include_inactive: bool = False) -> Dict[str, Dict[str, Any]]:
+        if self._pg:
+            cache = self._cache_get_json(self._pref_records_cache_key())
+            if cache is None:
+                with self._pg.cursor() as cur:
+                    cur.execute(
+                        "SELECT pref_type, pref_value FROM user_preferences WHERE user_id=%s",
+                        (self.user_id,),
+                    )
+                    rows = cur.fetchall()
+                cache = {}
+                for ptype, pvalue in rows:
+                    record = self._normalize_preference_record(ptype, pvalue)
+                    cache[ptype] = record
+                self._cache_set_json(self._pref_records_cache_key(), cache)
+            if include_inactive:
+                return cache
+            return {
+                ptype: record
+                for ptype, record in cache.items()
+                if record.get("status", "active") == "active"
+            }
+
+        result = {}
+        for pref in self._json_data["preferences"]:
+            ptype = pref.get("type")
+            if not ptype:
+                continue
+            record = self._normalize_preference_record(ptype, pref)
+            if include_inactive or record.get("status", "active") == "active":
+                result[ptype] = record
+        return result
+
+    def _normalize_preference_record(self, pref_type: str, raw: Any) -> Dict[str, Any]:
+        if self._is_preference_record(raw):
+            record = dict(raw)
+            record.setdefault("type", pref_type)
+            record.setdefault("status", "active")
+            record.setdefault("confidence", 1.0)
+            record.setdefault("scope", "global")
+            record.setdefault("version", 1)
+            record.setdefault("source", {})
+            record.setdefault("history", [])
+            return record
+
+        now = datetime.now().isoformat()
+        return {
+            "type": pref_type,
+            "value": raw.get("value") if isinstance(raw, dict) and "value" in raw else raw,
+            "status": "active",
+            "scope": "global",
+            "confidence": 1.0,
+            "source": {},
+            "version": 1,
+            "created_at": raw.get("created_at", now) if isinstance(raw, dict) else now,
+            "updated_at": raw.get("updated_at", now) if isinstance(raw, dict) else now,
+            "history": [],
+        }
+
+    def _build_preference_record(
+        self,
+        pref_type: str,
+        value: Any,
+        metadata: Dict[str, Any],
+        action: str,
+        existing_record: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        now = datetime.now().isoformat()
+        previous_record = dict(existing_record) if isinstance(existing_record, dict) else None
+        version = int(previous_record.get("version", 0)) + 1 if previous_record else 1
+        history = list(previous_record.get("history", [])) if previous_record else []
+        if previous_record:
+            history.append(
+                {
+                    "value": previous_record.get("value"),
+                    "status": previous_record.get("status", "active"),
+                    "source": previous_record.get("source", {}),
+                    "updated_at": previous_record.get("updated_at"),
+                    "version": previous_record.get("version", 1),
+                }
+            )
+
+        source = metadata.get("source") if isinstance(metadata.get("source"), dict) else {}
+        if not source:
+            source = {
+                key: metadata.get(key)
+                for key in ("session_id", "turn_id", "quote", "owner", "reason")
+                if metadata.get(key) is not None
+            }
+
+        return {
+            "type": pref_type,
+            "value": value,
+            "status": metadata.get("status", "active"),
+            "scope": metadata.get("scope", "global"),
+            "confidence": float(metadata.get("confidence", 1.0) or 1.0),
+            "source": source,
+            "action": action or "replace",
+            "version": version,
+            "created_at": previous_record.get("created_at", now) if previous_record else now,
+            "updated_at": now,
+            "history": history[-20:],
+        }
+
+    def _is_preference_record(self, value: Any) -> bool:
+        return isinstance(value, dict) and "type" in value and "value" in value and (
+            "version" in value or "source" in value or "status" in value
+        )
+
+    def _preference_value(self, raw: Any) -> Any:
+        if isinstance(raw, dict) and "value" in raw:
+            return raw.get("value")
+        return raw
+
+    def _preference_status(self, raw: Any) -> str:
+        if isinstance(raw, dict):
+            return str(raw.get("status", "active"))
+        return "active"
 
     def add_hotel_brand(self, brand: str):
         current = self.get_preference("hotel_brands")
@@ -570,9 +718,12 @@ class LongTermMemory:
                 "total_trips": total_trips,
                 "total_messages": total_messages,
                 "frequent_destinations": frequent,
+                "total_preferences": len(self.get_preference_records(include_inactive=True)),
             }
 
-        return self._json_data.get("statistics", {}).copy()
+        stats = self._json_data.get("statistics", {}).copy()
+        stats["total_preferences"] = len(self.get_preference_records(include_inactive=True))
+        return stats
 
     def clear_history(self):
         if self._pg:
@@ -604,6 +755,7 @@ class LongTermMemory:
                 cur.execute("DELETE FROM behavior_feedback WHERE user_id=%s", (self.user_id,))
                 cur.execute("DELETE FROM session_meta WHERE user_id=%s", (self.user_id,))
             self._cache_delete(self._pref_cache_key())
+            self._cache_delete(self._pref_records_cache_key())
             self._cache_delete(self._session_meta_cache_key())
             return
 

@@ -1,38 +1,21 @@
 """TravelFlow canonical agent adapters.
 
-These classes expose the five-agent architecture while reusing the existing
-skill implementations under ``.claude/skills``.
+These classes expose the five-agent architecture while keeping implementation
+modules under ``agents/`` and memory support under ``context/``.
 """
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import logging
-import sys
-from pathlib import Path
 from typing import Any, Dict, List
 
+from agents.clarification_agent import EventCollectionAgent
+from agents.plan_agent import ItineraryPlanningAgent
 from agents.preference_agent import PreferenceAgent
+from agents.search_agent import InformationQueryAgent
 
 logger = logging.getLogger(__name__)
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-
-
-def _load_skill_agent(skill_name: str):
-    script_path = PROJECT_ROOT / ".claude" / "skills" / skill_name / "script" / "agent.py"
-    module_name = f"travelflow_skill_{skill_name.replace('-', '_')}"
-    spec = importlib.util.spec_from_file_location(module_name, script_path)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Cannot load skill agent from {script_path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = module
-    spec.loader.exec_module(module)
-    for obj in module.__dict__.values():
-        if isinstance(obj, type) and (hasattr(obj, "run") or hasattr(obj, "reply")):
-            return obj
-    raise ValueError(f"No runnable agent class found in {script_path}")
 
 
 class SearchAgent:
@@ -41,7 +24,7 @@ class SearchAgent:
     def __init__(self, name: str = "SearchAgent", model=None, **kwargs):
         super().__init__()
         self.name = name
-        self._delegate = _load_skill_agent("query-info")(name=name, model=model, **kwargs)
+        self._delegate = InformationQueryAgent(name=name, model=model, **kwargs)
 
     async def run(self, state: Dict[str, Any]) -> Dict[str, Any]:
         return await self._delegate.run(state)
@@ -53,7 +36,7 @@ class PlanAgent:
     def __init__(self, name: str = "PlanAgent", model=None, **kwargs):
         super().__init__()
         self.name = name
-        self._delegate = _load_skill_agent("plan-trip")(name=name, model=model, **kwargs)
+        self._delegate = ItineraryPlanningAgent(name=name, model=model, **kwargs)
 
     async def run(self, state: Dict[str, Any]) -> Dict[str, Any]:
         return await self._delegate.run(state)
@@ -65,7 +48,7 @@ class ClarificationAgent:
     def __init__(self, name: str = "ClarificationAgent", model=None, **kwargs):
         super().__init__()
         self.name = name
-        self._delegate = _load_skill_agent("event-collection")(name=name, model=model, **kwargs)
+        self._delegate = EventCollectionAgent(name=name, model=model, **kwargs)
 
     async def run(self, state: Dict[str, Any]) -> Dict[str, Any]:
         return await self._delegate.run(state)

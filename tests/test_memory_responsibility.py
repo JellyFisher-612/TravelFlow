@@ -232,6 +232,58 @@ class SupervisorMemoryManager:
         self.applied.append((list(results), policy or {}))
 
 
+class DirectMemoryManager:
+    def __init__(self):
+        self.short_term = self
+        self.long_term = self
+        self.applied = []
+
+    def get_recent_context(self, n_turns=3):
+        return []
+
+    def get_preference(self):
+        return {"nickname": "小李", "pace_preference": "轻松"}
+
+    def get_trip_history(self, limit=20):
+        return [{"origin": "上海", "destination": "北京", "start_date": "2026-05-05"}]
+
+    def get_behavior_feedback(self, limit=20):
+        return []
+
+    def get_runtime_context(self, recent_turns=3, trip_limit=20, feedback_limit=20):
+        return {
+            "recent_dialogue": [],
+            "user_preferences": self.get_preference(),
+            "trip_history": self.get_trip_history(trip_limit),
+            "behavior_feedback": self.get_behavior_feedback(feedback_limit),
+        }
+
+    def query_memory(self, query, context=None):
+        context = context or self.get_runtime_context()
+        prefs = context.get("user_preferences") or {}
+        return {
+            "query": query,
+            "answer": f"你的称呼是{prefs.get('nickname')}。",
+            "preferences": prefs,
+            "trip_history": context.get("trip_history", []),
+            "behavior_feedback": context.get("behavior_feedback", []),
+        }
+
+    def is_explicit_preference_update_result(self, result):
+        return False
+
+    def apply_agent_results(self, results, policy=None):
+        self.applied.append((list(results), policy or {}))
+
+
+class ExplodingScheduler:
+    def create_orchestration_state(self, state):
+        raise AssertionError("Memory-only turns should be handled by MainAgent directly")
+
+    def set_event_callback(self, callback):
+        pass
+
+
 class MemoryResponsibilityTests(unittest.IsolatedAsyncioTestCase):
     def build_memory_manager(self) -> tuple[MemoryManager, FakeLongTermStore, FakeShortTermStore]:
         manager = MemoryManager.__new__(MemoryManager)
@@ -303,6 +355,61 @@ class MemoryResponsibilityTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual("no_agents", state["final_result"]["status"])
         self.assertEqual("create", scheduler.calls[0][0])
+
+    async def test_main_agent_handles_memory_query_without_scheduler_subagent(self):
+        memory_manager = DirectMemoryManager()
+
+        class MemoryIntentRecognition:
+            async def run(self, state):
+                return {
+                    **state,
+                    "intention_data": {
+                        "intents": [{"type": "memory"}],
+                        "key_entities": {},
+                        "rewritten_query": "我是谁",
+                        "direct_action": {"type": "memory", "operation": "query"},
+                        "agent_schedule": [],
+                    },
+                }
+
+        agent = MainAgent(
+            intent_recognition=MemoryIntentRecognition(),
+            agent_scheduler=ExplodingScheduler(),
+            memory_manager=memory_manager,
+        )
+
+        state = await agent.run({"user_query": "我是谁"})
+
+        self.assertEqual("completed", state["final_result"]["status"])
+        self.assertIn("小李", state["final_result"]["results"][0]["data"]["answer"])
+        self.assertEqual(1, len(memory_manager.applied))
+        self.assertFalse(memory_manager.applied[0][1]["allow_preference_writes"])
+
+    async def test_main_agent_keeps_legacy_memory_schedule_compatibility(self):
+        memory_manager = DirectMemoryManager()
+
+        class LegacyMemoryIntentRecognition:
+            async def run(self, state):
+                return {
+                    **state,
+                    "intention_data": {
+                        "intents": [{"type": "memory"}],
+                        "key_entities": {},
+                        "rewritten_query": "我是谁",
+                        "agent_schedule": [{"agent_name": "memory", "priority": 1}],
+                    },
+                }
+
+        agent = MainAgent(
+            intent_recognition=LegacyMemoryIntentRecognition(),
+            agent_scheduler=ExplodingScheduler(),
+            memory_manager=memory_manager,
+        )
+
+        state = await agent.run({"user_query": "我是谁"})
+
+        self.assertEqual("completed", state["final_result"]["status"])
+        self.assertIn("小李", state["final_result"]["results"][0]["data"]["answer"])
 
     async def test_main_agent_supervises_child_agent_batches(self):
         scheduler = SupervisableFakeScheduler()

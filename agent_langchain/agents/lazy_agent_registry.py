@@ -2,9 +2,8 @@
 # -*- coding: utf-8 -*-
 """
 懒加载智能体注册器
-基于 .claude/skills 目录结构的插件化加载机制
+基于正式 Python 模块装配生产智能体，保留 .claude/skills 作为能力说明目录
 """
-import os
 import sys
 import importlib
 import importlib.util
@@ -15,10 +14,10 @@ from rich.console import Console
 
 class LazyAgentRegistry:
     """
-    懒加载智能体注册器 - 插件化版本
+    懒加载智能体注册器。
     
-    自动扫描 .claude/skills 下的技能目录，保留技能发现能力；
-    对核心生产智能体优先从正式模块装配，其余能力仍可回退到脚本动态加载。
+    生产智能体优先从正式模块装配；.claude/skills 只用于发现
+    SKILL.md 能力说明，并为旧入口保留兼容回退。
     """
 
     def __init__(self, model, cache: Dict, memory_manager=None, event_callback: Optional[Callable[[str], None]] = None):
@@ -36,10 +35,10 @@ class LazyAgentRegistry:
         self.event_callback = event_callback
         self.console = Console()
         
-        # 技能目录路径
-        self.skills_root = Path(".claude/skills")
+        # 能力说明目录路径
+        self.skills_root = Path(__file__).resolve().parents[1] / ".claude" / "skills"
         
-        # 技能映射表: skill_name -> agent_script_path
+        # 能力说明映射表: skill_name -> SKILL.md path
         self._skill_map: Dict[str, Path] = {}
 
         # 正式模块映射: skill_name -> import path
@@ -49,9 +48,19 @@ class LazyAgentRegistry:
             "plan": "agents.travelflow_agents.PlanAgent",
             "clarification": "agents.travelflow_agents.ClarificationAgent",
             "preference": "agents.preference_agent.PreferenceAgent",
+            "memory_query": "context.memory_query.MemoryQueryAgent",
+            "memory-query": "context.memory_query.MemoryQueryAgent",
+            "information_query": "agents.travelflow_agents.SearchAgent",
+            "query-info": "agents.search_agent.InformationQueryAgent",
+            "itinerary_planning": "agents.travelflow_agents.PlanAgent",
+            "plan-trip": "agents.plan_agent.ItineraryPlanningAgent",
+        }
+        self._hidden_legacy_aliases: Dict[str, str] = {
+            "event_collection": "clarification",
+            "event-collection": "clarification",
         }
         
-        # 发现技能
+        # 发现能力说明
         self._discover_skills()
         
         # 旧版兼容映射 (name -> skill_folder_name)
@@ -64,26 +73,21 @@ class LazyAgentRegistry:
             "preference": "preference",
             "information_query": "query-info",
             "itinerary_planning": "plan-trip",
-            "event_collection": "event-collection"
         }
 
     def _discover_skills(self):
-        """扫描 .claude/skills 目录寻找可用的 Agent"""
+        """扫描 .claude/skills 目录寻找可用的能力说明。"""
         if not self.skills_root.exists():
             self.console.print(f"[yellow]Warning: Skills directory {self.skills_root} not found[/yellow]")
             return
 
-        count = 0
         for skill_dir in self.skills_root.iterdir():
             if not skill_dir.is_dir():
                 continue
             
-            # 查找 script/agent.py
-            agent_script = skill_dir / "script" / "agent.py"
-            if agent_script.exists():
-                skill_name = skill_dir.name
-                self._skill_map[skill_name] = agent_script
-                count += 1
+            skill_doc = skill_dir / "SKILL.md"
+            if skill_doc.exists():
+                self._skill_map[skill_dir.name] = skill_doc
                 
         # self.console.print(f"[dim]已发现 {count} 个技能插件[/dim]")
 
@@ -91,6 +95,8 @@ class LazyAgentRegistry:
         """解析智能体名称到技能目录名"""
         if agent_name in self._formal_agent_classes:
             return agent_name
+        if agent_name in self._hidden_legacy_aliases:
+            return self._hidden_legacy_aliases[agent_name]
 
         # 1. 直接匹配技能名
         if agent_name in self._skill_map:
@@ -120,7 +126,7 @@ class LazyAgentRegistry:
 
         skill_name = self._resolve_agent_name(agent_name)
         if not skill_name:
-             raise KeyError(f"Agent '{agent_name}' not found in skills directory")
+             raise KeyError(f"Agent '{agent_name}' not found in registry")
 
         loading_msg = f"🔄 正在加载 {agent_name} (from {skill_name})..."
         self.console.print(f"[dim]{loading_msg}[/dim]")
@@ -163,7 +169,10 @@ class LazyAgentRegistry:
                 return agent_class
             raise TypeError(f"Configured class {class_path} does not implement run(state)")
 
-        script_path = self._skill_map[skill_name]
+        skill_doc = self._skill_map[skill_name]
+        script_path = skill_doc.parent / "script" / "agent.py"
+        if not script_path.exists():
+            raise KeyError(f"Agent '{skill_name}' has no formal class or legacy script")
         module_name = f"skills.{skill_name}.agent"
         spec = importlib.util.spec_from_file_location(module_name, script_path)
         if spec is None or spec.loader is None:

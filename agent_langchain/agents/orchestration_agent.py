@@ -217,7 +217,7 @@ class AgentScheduler:
                 }
             )
             return {
-                "context": self._prepare_context(intention_data),
+                "context": self._prepare_context(intention_data, state.get("context", {})),
                 "batches": [],
                 "batch_index": 0,
                 "results": [],
@@ -264,7 +264,7 @@ class AgentScheduler:
         )
 
         return {
-            "context": self._prepare_context(intention_data),
+            "context": self._prepare_context(intention_data, state.get("context", {})),
             "batches": batches,
             "batch_index": 0,
             "results": [],
@@ -462,7 +462,7 @@ class AgentScheduler:
             return False
 
         remaining_tasks = [task for batch in batches[batch_index:] for task in batch]
-        if not any(task.get("agent_name") in {"search", "memory", "plan"} for task in remaining_tasks):
+        if not any(task.get("agent_name") in {"search", "plan"} for task in remaining_tasks):
             return False
 
         critical_fields = {"destination", "start_date", "duration_days", "budget_level", "pace_preference"}
@@ -522,18 +522,35 @@ class AgentScheduler:
                 return True
         return False
 
-    def _prepare_context(self, intention_data: Dict[str, Any]) -> Dict[str, Any]:
-        context = {
+    def _prepare_context(self, intention_data: Dict[str, Any], base_context: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        context = dict(base_context or {})
+        context.update({
             "reasoning": intention_data.get("reasoning", ""),
             "intents": intention_data.get("intents", []),
             "key_entities": intention_data.get("key_entities", {}),
             "rewritten_query": intention_data.get("rewritten_query", ""),
-        }
+        })
 
         if self.memory_manager:
-            recent_context = self.memory_manager.short_term.get_recent_context(3)
-            context["recent_dialogue"] = recent_context
-            context["user_preferences"] = self.memory_manager.long_term.get_preference()
+            memory_context = dict(context.get("memory_context") or {})
+            if "recent_dialogue" not in context:
+                recent_context = self.memory_manager.short_term.get_recent_context(3)
+                context["recent_dialogue"] = recent_context
+                memory_context.setdefault("recent_dialogue", recent_context)
+            if "user_preferences" not in context:
+                preferences = self.memory_manager.long_term.get_preference()
+                context["user_preferences"] = preferences
+                memory_context.setdefault("user_preferences", preferences)
+            if "trip_history" not in context and hasattr(self.memory_manager.long_term, "get_trip_history"):
+                trip_history = self.memory_manager.long_term.get_trip_history(limit=20)
+                context["trip_history"] = trip_history
+                memory_context.setdefault("trip_history", trip_history)
+            if "behavior_feedback" not in context and hasattr(self.memory_manager.long_term, "get_behavior_feedback"):
+                behavior_feedback = self.memory_manager.long_term.get_behavior_feedback(limit=20)
+                context["behavior_feedback"] = behavior_feedback
+                memory_context.setdefault("behavior_feedback", behavior_feedback)
+            if memory_context:
+                context["memory_context"] = memory_context
 
         return context
 
@@ -855,7 +872,7 @@ class AgentScheduler:
 
     def _display_agent_name(self, agent_name: str) -> str:
         return {
-            "memory": "记忆与偏好智能体",
+            "memory": "记忆能力（兼容别名）",
             "search": "信息检索智能体",
             "plan": "行程规划智能体",
             "clarification": "事项收集智能体",

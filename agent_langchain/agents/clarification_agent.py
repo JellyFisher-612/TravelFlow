@@ -8,13 +8,9 @@ from __future__ import annotations
 import importlib
 import json
 import logging
-import os
 import re
-import sys
 from typing import Any, Dict, List, Optional
 
-# Add project root to sys.path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../..")))
 from utils.structured_output_guard import (
     is_structured_output_unavailable_error,
     mark_structured_output_unsupported,

@@ -12,6 +12,7 @@ from typing import Any, Callable, Dict, Optional
 
 from agents.agent_scheduler import AgentScheduler
 from agents.intent_recognition import IntentRecognition
+from agents.workflow_skills.router import SkillRouter
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,7 @@ class MainAgent:
         memory_manager=None,
         event_callback: Optional[Callable[[Any], None]] = None,
         intention_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        skill_router: Optional[Any] = None,
         **kwargs,
     ):
         super().__init__()
@@ -40,6 +42,7 @@ class MainAgent:
         self.memory_manager = memory_manager
         self.event_callback = event_callback
         self.intention_callback = intention_callback
+        self.skill_router = SkillRouter() if skill_router is None else skill_router
 
         # Backward-compatible attribute names for older callers.
         self.intention_agent = self.intent_recognition
@@ -73,14 +76,27 @@ class MainAgent:
             return {**state, "final_result": {"status": "error", "message": "主智能体未配置调度器"}}
 
         self._emit_event("🧠 主智能体正在理解用户需求...")
+        workflow_match = self._match_workflow_skill(state)
+        if workflow_match:
+            return await self._run_workflow_skill(state, workflow_match)
+
         intention_state = await self.intent_recognition.run(state)
+        return await self._run_intention_state(intention_state)
+
+    async def _run_intention_state(self, intention_state: Dict[str, Any]) -> Dict[str, Any]:
+        """Run a prepared intention through MainAgent supervision."""
+
         intention_data = intention_state.get("intention_data")
         if not isinstance(intention_data, dict):
-            return {**state, "final_result": {"status": "error", "message": "无法理解您的需求，请重新描述。"}}
+            return {**intention_state, "final_result": {"status": "error", "message": "无法理解您的需求，请重新描述。"}}
 
         self._emit_intention(intention_data)
 
         schedule = intention_data.get("agent_schedule") or []
+        if self._is_main_agent_memory_turn(intention_data):
+            self._emit_event("🧠 主智能体正在处理记忆请求...")
+            return await self._handle_memory_turn(intention_state)
+
         if schedule:
             self._emit_event("🧩 主智能体正在监督业务智能体执行...")
         else:
@@ -88,9 +104,170 @@ class MainAgent:
 
         return await self._supervise_business_agents(intention_state)
 
+    def _match_workflow_skill(self, state: Dict[str, Any]):
+        """Match common business workflow skills before LLM intent recognition."""
+
+        if not self.skill_router or not hasattr(self.skill_router, "match"):
+            return None
+        match = self.skill_router.match(state)
+        if not match:
+            return None
+        self._emit_event(
+            {
+                "type": "chain",
+                "stage": "workflow_skill",
+                "title": "命中常见业务 Skill",
+                "message": f"已命中 {match.skill_name}，按 Skill 内置 workflow 执行。",
+                "skill_name": match.skill_name,
+                "confidence": match.confidence,
+                "reason": match.reason,
+                "workflow_plan": match.workflow_plan,
+            }
+        )
+        return match
+
+    async def _run_workflow_skill(self, state: Dict[str, Any], match) -> Dict[str, Any]:
+        """Execute a matched workflow skill through the shared runtime."""
+
+        intention_state = {
+            **state,
+            "intention_data": match.intention_data,
+            "workflow_plan": match.workflow_plan,
+            "workflow_skill": {
+                "name": match.skill_name,
+                "confidence": match.confidence,
+                "reason": match.reason,
+                "slots": match.slots,
+                "workflow_plan": match.workflow_plan,
+            },
+        }
+        return await self._run_intention_state(intention_state)
+
+    def _is_main_agent_memory_turn(self, intention_data: Dict[str, Any]) -> bool:
+        direct_action = intention_data.get("direct_action")
+        if isinstance(direct_action, dict) and direct_action.get("type") == "memory":
+            return True
+
+        # Backward compatibility: older recognizers may still express a
+        # memory-only internal action as a legacy memory schedule item.
+        schedule = intention_data.get("agent_schedule") or []
+        if not schedule or not isinstance(schedule, list):
+            return False
+        memory_names = {"memory", "memory_query", "preference"}
+        for task in schedule:
+            if not isinstance(task, dict):
+                return False
+            if str(task.get("agent_name", "")).strip() not in memory_names:
+                return False
+        return True
+
+    async def _handle_memory_turn(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """Handle explicit memory queries/updates as a MainAgent capability."""
+
+        state = self._inject_memory_context(state)
+        intention_data = state.get("intention_data") or {}
+        query = intention_data.get("rewritten_query") or state.get("user_query", "")
+        intents = intention_data.get("intents") or []
+        state = {
+            **state,
+            "context": {
+                **(state.get("context") or {}),
+                "rewritten_query": query,
+                "intents": intents,
+                "key_entities": intention_data.get("key_entities", {}),
+            },
+        }
+
+        if self._is_preference_update_intent(intents, query):
+            data = await self._extract_preference_update(state)
+        else:
+            data = self._query_memory_direct(query, state.get("context", {}))
+
+        result = {
+            "agent_name": "memory",
+            "priority": 1,
+            "result": {
+                "status": "success",
+                "agent_name": "memory",
+                "data": data,
+            },
+        }
+        final_result = {
+            "status": "completed",
+            "intention": {
+                "intents": intention_data.get("intents", []),
+                "key_entities": intention_data.get("key_entities", {}),
+            },
+            "agents_executed": 1,
+            "results": [
+                {
+                    "agent_name": "memory",
+                    "priority": 1,
+                    "status": "success",
+                    "data": data,
+                }
+            ],
+        }
+        memory_policy = self._build_memory_policy({"results": [result]})
+        self._apply_memory_policy([result], memory_policy)
+        final_result["memory_policy"] = memory_policy
+
+        return {
+            **state,
+            "results": [result],
+            "final_result": final_result,
+        }
+
+    def _is_preference_update_intent(self, intents: Any, query: str) -> bool:
+        for item in intents or []:
+            if isinstance(item, dict) and str(item.get("type", "")).strip().lower() in {"preference", "preference_management"}:
+                return True
+
+        q = query or ""
+        explicit_markers = (
+            "我喜欢",
+            "我不喜欢",
+            "我的偏好",
+            "我偏好",
+            "记住",
+            "帮我记住",
+            "以后",
+            "以后都",
+            "长期",
+            "平时",
+            "通常",
+            "每次",
+            "下次",
+        )
+        preference_words = ("偏好", "喜欢", "不喜欢", "预算", "酒店", "交通方式", "节奏", "餐饮", "常住", "住在")
+        return any(marker in q for marker in explicit_markers) and any(word in q for word in preference_words)
+
+    async def _extract_preference_update(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            from agents.preference_agent import PreferenceAgent
+
+            extractor = PreferenceAgent(
+                name="MainAgentPreferenceExtractor",
+                model=self.model,
+                memory_manager=self.memory_manager,
+            )
+            return await extractor.run(state)
+        except Exception as e:
+            logger.error("MainAgent preference extraction failed: %s", e)
+            return {"has_preferences": False, "preferences": [], "error": str(e)}
+
+    def _query_memory_direct(self, query: str, context: Dict[str, Any]) -> Dict[str, Any]:
+        if not self.memory_manager:
+            return {"query": query, "answer": "当前未启用记忆系统。"}
+        if hasattr(self.memory_manager, "query_memory"):
+            memory_context = context.get("memory_context") if isinstance(context.get("memory_context"), dict) else context
+            return self.memory_manager.query_memory(query, memory_context)
+        return {"query": query, "answer": "当前记忆系统不支持直接查询。"}
+
     async def _supervise_business_agents(self, state: Dict[str, Any]) -> Dict[str, Any]:
         """Run child agents while MainAgent keeps ownership of the turn state."""
 
+        state = self._inject_memory_context(state)
         scheduler = self.agent_scheduler
         graph_state = scheduler.create_orchestration_state(state)
         graph_state.update(await scheduler.prepare(graph_state))
@@ -126,6 +303,71 @@ class MainAgent:
             "results": graph_state.get("results", []),
             "final_result": graph_state.get("final_result", {"status": "error", "message": "Unknown error"}),
         }
+
+    def _inject_memory_context(self, state: Dict[str, Any]) -> Dict[str, Any]:
+        """Attach MainAgent-owned memory context before business scheduling."""
+
+        memory_context = self._build_memory_context()
+        if not memory_context:
+            return state
+
+        context = dict(state.get("context") or {})
+        existing_memory_context = context.get("memory_context")
+        if isinstance(existing_memory_context, dict):
+            merged_memory_context = {**memory_context, **existing_memory_context}
+        else:
+            merged_memory_context = memory_context
+
+        context["memory_context"] = merged_memory_context
+        for key in ("recent_dialogue", "user_preferences", "trip_history", "behavior_feedback"):
+            if key in memory_context and key not in context:
+                context[key] = memory_context[key]
+
+        return {**state, "context": context}
+
+    def _build_memory_context(self) -> Dict[str, Any]:
+        if not self.memory_manager:
+            return {}
+
+        if hasattr(self.memory_manager, "get_runtime_context"):
+            try:
+                return self.memory_manager.get_runtime_context(
+                    recent_turns=3,
+                    trip_limit=20,
+                    feedback_limit=20,
+                )
+            except Exception:
+                logger.debug("Failed to build memory runtime context", exc_info=True)
+
+        memory_context: Dict[str, Any] = {}
+        short_term = getattr(self.memory_manager, "short_term", None)
+        long_term = getattr(self.memory_manager, "long_term", None)
+
+        if short_term and hasattr(short_term, "get_recent_context"):
+            try:
+                memory_context["recent_dialogue"] = short_term.get_recent_context(3)
+            except Exception:
+                logger.debug("Failed to read short-term memory context", exc_info=True)
+
+        if long_term and hasattr(long_term, "get_preference"):
+            try:
+                memory_context["user_preferences"] = long_term.get_preference()
+            except Exception:
+                logger.debug("Failed to read user preferences", exc_info=True)
+
+        if long_term and hasattr(long_term, "get_trip_history"):
+            try:
+                memory_context["trip_history"] = long_term.get_trip_history(limit=20)
+            except Exception:
+                logger.debug("Failed to read trip history", exc_info=True)
+
+        if long_term and hasattr(long_term, "get_behavior_feedback"):
+            try:
+                memory_context["behavior_feedback"] = long_term.get_behavior_feedback(limit=20)
+            except Exception:
+                logger.debug("Failed to read behavior feedback", exc_info=True)
+
+        return {key: value for key, value in memory_context.items() if value not in (None, "")}
 
     def _observe_after_batch(self, graph_state: Dict[str, Any]) -> str:
         scheduler = self.agent_scheduler
@@ -211,10 +453,7 @@ class MainAgent:
         )
 
         explicit_memory_update = any(
-            result.get("agent_name") in {"memory", "preference"}
-            and isinstance(result.get("result"), dict)
-            and isinstance(result.get("result", {}).get("data"), dict)
-            and bool(result.get("result", {}).get("data", {}).get("preferences"))
+            self._is_explicit_preference_update_result(result)
             for result in results
             if isinstance(result, dict)
         )
@@ -243,3 +482,8 @@ class MainAgent:
                 "policy": policy,
             }
         )
+
+    def _is_explicit_preference_update_result(self, result: Dict[str, Any]) -> bool:
+        if self.memory_manager and hasattr(self.memory_manager, "is_explicit_preference_update_result"):
+            return self.memory_manager.is_explicit_preference_update_result(result)
+        return False

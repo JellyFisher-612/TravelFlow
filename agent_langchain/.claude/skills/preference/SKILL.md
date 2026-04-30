@@ -15,7 +15,7 @@ description: Use this skill when the user states or updates their preferences, e
 
 - **PreferenceAgent** (`agents/preference_agent.py`)
 - 入参：**model**、**memory_manager**（用于读取当前偏好；写回由协调器或调用方完成）
-- **异步**：`reply()` 为 `async`，需 `await`
+- **异步**：`run(state)` 为 `async`，需 `await`
 
 ## 行为
 
@@ -27,28 +27,15 @@ description: Use this skill when the user states or updates their preferences, e
 
 ```python
 import asyncio
-import json
-from agentscope.message import Msg
-from agentscope.model import OpenAIChatModel
-from config_agentscope import init_agentscope
-from config import LLM_CONFIG
 from context.memory_manager import MemoryManager
 from agents.preference_agent import PreferenceAgent
+from utils.langchain_runtime import build_chat_model
 
 async def save_preference(user_query: str, user_id: str = "default_user", session_id: str = "default"):
-    init_agentscope()
-    model = OpenAIChatModel(
-        model_name=LLM_CONFIG["model_name"],
-        api_key=LLM_CONFIG["api_key"],
-        client_kwargs={"base_url": LLM_CONFIG["base_url"], "timeout": 60},
-        temperature=LLM_CONFIG.get("temperature", 0.7),
-        max_tokens=LLM_CONFIG.get("max_tokens", 2000),
-    )
+    model = build_chat_model()
     memory_manager = MemoryManager(user_id=user_id, session_id=session_id, llm_model=model)
     agent = PreferenceAgent(name="PreferenceAgent", model=model, memory_manager=memory_manager)
-    user_msg = Msg(name="user", content=user_query, role="user")
-    result = await agent.reply(user_msg)
-    data = json.loads(result.content) if isinstance(result.content, str) else result.content
+    data = await agent.run({"context": {"rewritten_query": user_query}})
     if data.get("has_preferences") and data.get("preferences"):
         for item in data["preferences"]:
             pref_type = item.get("type")

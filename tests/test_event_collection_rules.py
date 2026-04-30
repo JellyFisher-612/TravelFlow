@@ -1,20 +1,13 @@
 from __future__ import annotations
 
-import importlib.util
-from pathlib import Path
 import unittest
 
+from agents.clarification_agent import EventCollectionAgent
 from tests.fakes import ExplodingLLM
 
 
 def load_event_collection_agent_class():
-    root = Path(__file__).resolve().parents[1]
-    script_path = root / "agent_langchain" / ".claude" / "skills" / "event-collection" / "script" / "agent.py"
-    spec = importlib.util.spec_from_file_location("test_event_collection_agent", script_path)
-    module = importlib.util.module_from_spec(spec)
-    assert spec.loader is not None
-    spec.loader.exec_module(module)
-    return module.EventCollectionAgent
+    return EventCollectionAgent
 
 
 class EventCollectionRuleTests(unittest.IsolatedAsyncioTestCase):

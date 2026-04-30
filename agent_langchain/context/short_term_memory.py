@@ -29,7 +29,9 @@ class ShortTermMemory:
         self._cache_ttl = int(MEMORY_CONFIG.get("cache_ttl_sec", 3600))
         self._key = f"travelflow:stmem:{self.user_id}:{self.session_id}"
         self._pending_plan_key = f"{self._key}:pending_plan"
+        self._working_state_key = f"{self._key}:working_state"
         self._pending_plan: Optional[Dict[str, Any]] = None
+        self._working_state: Dict[str, Any] = {}
 
         self._init_redis()
 
@@ -114,10 +116,49 @@ class ShortTermMemory:
             try:
                 self._redis.delete(self._key)
                 self._redis.delete(self._pending_plan_key)
+                self._redis.delete(self._working_state_key)
             except Exception as e:
                 logger.warning("Redis delete failed: %s", e)
         self._memory_messages = []
         self._pending_plan = None
+        self._working_state = {}
+
+    def set_working_state(self, state: Dict[str, Any]):
+        payload = {
+            "state": state or {},
+            "timestamp": datetime.now().isoformat(),
+        }
+        if self._redis:
+            try:
+                self._redis.setex(self._working_state_key, self._cache_ttl, json.dumps(payload, ensure_ascii=False))
+                return
+            except Exception as e:
+                logger.warning("Redis working state write failed: %s", e)
+        self._working_state = payload
+
+    def get_working_state(self) -> Dict[str, Any]:
+        if self._redis:
+            try:
+                raw = self._redis.get(self._working_state_key)
+                payload = json.loads(raw) if raw else {}
+                return payload if isinstance(payload, dict) else {}
+            except Exception as e:
+                logger.warning("Redis working state read failed: %s", e)
+        return dict(self._working_state)
+
+    def update_working_state(self, patch: Dict[str, Any]):
+        current_payload = self.get_working_state()
+        current_state = current_payload.get("state") if isinstance(current_payload.get("state"), dict) else {}
+        current_state.update(patch or {})
+        self.set_working_state(current_state)
+
+    def clear_working_state(self):
+        if self._redis:
+            try:
+                self._redis.delete(self._working_state_key)
+            except Exception as e:
+                logger.warning("Redis working state delete failed: %s", e)
+        self._working_state = {}
 
     def set_pending_plan(self, query: str, metadata: Optional[Dict[str, Any]] = None):
         payload = {
@@ -128,10 +169,12 @@ class ShortTermMemory:
         if self._redis:
             try:
                 self._redis.setex(self._pending_plan_key, self._cache_ttl, json.dumps(payload, ensure_ascii=False))
+                self.update_working_state({"pending_plan": payload})
                 return
             except Exception as e:
                 logger.warning("Redis pending plan write failed: %s", e)
         self._pending_plan = payload
+        self.update_working_state({"pending_plan": payload})
 
     def get_pending_plan(self) -> Optional[Dict[str, Any]]:
         if self._redis:
@@ -149,6 +192,11 @@ class ShortTermMemory:
             except Exception as e:
                 logger.warning("Redis pending plan delete failed: %s", e)
         self._pending_plan = None
+        current_payload = self.get_working_state()
+        current_state = current_payload.get("state") if isinstance(current_payload.get("state"), dict) else {}
+        if "pending_plan" in current_state:
+            current_state.pop("pending_plan", None)
+            self.set_working_state(current_state)
 
     def get_statistics(self) -> Dict[str, Any]:
         messages = self._read_all_messages()
@@ -157,4 +205,5 @@ class ShortTermMemory:
             "max_turns": self.max_turns,
             "oldest_message_time": messages[0].get("timestamp") if messages else None,
             "newest_message_time": messages[-1].get("timestamp") if messages else None,
+            "has_working_state": bool(self.get_working_state().get("state")),
         }

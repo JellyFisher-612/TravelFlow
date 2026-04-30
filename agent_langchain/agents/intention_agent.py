@@ -49,6 +49,7 @@ class IntentionOutput(BaseModel):
     rewritten_query: str = Field(default="", description="标准化查询")
     agent_schedule: List[AgentScheduleItem] = Field(default_factory=list)
     direct_answer: str = Field(default="", description="无需调度业务智能体时的直接回复")
+    direct_action: Dict[str, Any] = Field(default_factory=dict, description="MainAgent 内部动作，不进入业务智能体调度")
 
 
 class IntentRecognition:
@@ -104,7 +105,6 @@ class IntentRecognition:
             "memory-query": "memory",
             "preference": "memory",
             "query-info": "search",
-            "event-collection": "clarification",
             "plan-trip": "plan",
         }
         dynamic_skills_prompt = self.skill_loader.get_skill_prompt(skill_mapping)
@@ -124,23 +124,26 @@ class IntentRecognition:
 【TravelFlow 可调度子智能体】
 {dynamic_skills_prompt}
 
-固定只能调度以下四类业务智能体；MainAgent、IntentRecognition 和 AgentScheduler 都不是业务智能体，不要放入 agent_schedule：
+固定只能调度以下三类业务智能体；MainAgent、IntentRecognition、AgentScheduler 和记忆系统都不是业务智能体，不要放入 agent_schedule：
 - search：信息检索智能体，通过高德开放平台 API 获取景点、天气、路线、POI 等外部数据。
 - plan：行程规划智能体，基于用户偏好、外部数据和行程要素生成个性化旅行计划。
 - clarification：事项收集智能体，在需求不明确时提取/追问目的地、时间、预算、同行人等关键字段。
-- memory：记忆与偏好智能体，查询或更新用户长期偏好、历史行程、行为反馈和历史对话。
+
+显式记忆查询或长期偏好更新不是业务子智能体调度。遇到“我的偏好/历史/我是谁/记住/以后默认”等请求时：
+- intents 使用 type="memory"
+- agent_schedule 必须为空
+- direct_action 使用 {{"type": "memory", "operation": "query" | "profile_update"}}
 
 【重要 - 意图区分原则】
 请基于语义理解判断意图，不要机械匹配关键词。
 - "我去过北京吗？" → memory
-- "我喜欢轻松一点的行程" / "我预算不高" → memory
+- "以后我都喜欢轻松一点的行程" / "帮我记住我的预算不高" → memory
 - "北京怎么样？" / "北京有什么好玩的？" / "杭州明天天气怎么样？" → search
-- "我想去北京玩三天" → clarification → search + memory → plan
+- "我想去北京玩三天" → clarification → search → plan
 
 优先级规则：
-- memory 优先于 search（当问题涉及用户自己的历史或偏好时）
-- 如果用户明确询问"我的"、"我过去的"，必须识别为 memory
-- 需要规划行程时，必须按层级调度：clarification 先收集字段；search 与 memory 同层并行补全外部信息和内部记忆；最后 plan 生成方案
+- 如果用户明确询问"我的"、"我过去的"，必须识别为 memory，并返回 direct_action，不调度业务智能体
+- 需要规划行程时，必须按层级调度：clarification 先收集字段；search 检索外部信息；最后 plan 生成方案。用户长期偏好和历史由 MainAgent 注入上下文，不要把 memory 放入规划链路。
 
 【多轮对话与更正规则】
 你必须结合【对话历史上下文】理解当前这句话是在纠正/补充之前的意图，还是开启一个全新的话题：
@@ -176,7 +179,8 @@ class IntentRecognition:
 2. intents: 识别的多意图（包含 type, confidence, description, reason）
 3. key_entities: 关键实体
 4. rewritten_query: 标准化查询
-5. agent_schedule: 调度策略（agent_name, priority, reason, expected_output）
+5. agent_schedule: 业务智能体调度策略（agent_name, priority, reason, expected_output）
+6. direct_action: MainAgent 内部动作；显式记忆请求使用 {{"type": "memory", "operation": "query" | "profile_update"}}，普通业务调度留空
 
 【优先级设置规则】
 优先级数字相同的智能体会并行执行，不同优先级按顺序执行。
@@ -186,10 +190,9 @@ Priority 1:
 
 Priority 2:
 - search（外部信息检索，依赖 clarification 的目的地、日期等信息调用高德 API）
-- memory（内部信息检索，读取用户偏好、历史行程、行为反馈；规划类请求应与 search 同层并行）
 
 Priority 3:
-- plan（依赖 memory、clarification、search 的结果生成完整行程）
+- plan（依赖 MainAgent 注入的记忆上下文、clarification 和 search 的结果生成完整行程）
 
 请确保输出可被结构化解析，并尽量完整。"""
 
@@ -266,17 +269,10 @@ Priority 3:
                 "expected_output": by_name.get("search", {}).get("expected_output", "目的地 POI、天气、路线等外部数据"),
             },
             {
-                **by_name.get("memory", {}),
-                "agent_name": "memory",
-                "priority": 2,
-                "reason": by_name.get("memory", {}).get("reason", "读取用户偏好、历史行程和行为反馈作为内部信息"),
-                "expected_output": by_name.get("memory", {}).get("expected_output", "用户偏好、历史行程和行为反馈"),
-            },
-            {
                 **by_name.get("plan", {}),
                 "agent_name": "plan",
                 "priority": 3,
-                "reason": by_name.get("plan", {}).get("reason", "整合事项字段、外部信息和内部记忆生成旅行计划"),
+                "reason": by_name.get("plan", {}).get("reason", "整合事项字段、外部信息和 MainAgent 注入的记忆上下文生成旅行计划"),
                 "expected_output": by_name.get("plan", {}).get("expected_output", "结构化旅行计划"),
             },
         ]
@@ -687,7 +683,7 @@ Priority 3:
         )
         if any(word in query for word in planning_words) and has_trip_movement:
             return {
-                "reasoning": "用户提出明确行程规划请求，按层级执行：先收集行程字段，再并行检索外部信息和内部记忆，最后生成计划。",
+                "reasoning": "用户提出明确行程规划请求，按层级执行：先收集行程字段，再检索外部信息，最后结合 MainAgent 注入的记忆上下文生成计划。",
                 "intents": [
                     {
                         "type": "plan",
@@ -712,15 +708,9 @@ Priority 3:
                         "expected_output": "目的地 POI、天气、路线等外部数据",
                     },
                     {
-                        "agent_name": "memory",
-                        "priority": 2,
-                        "reason": "读取用户偏好、历史行程和行为反馈作为内部信息",
-                        "expected_output": "用户偏好、历史行程和行为反馈",
-                    },
-                    {
                         "agent_name": "plan",
                         "priority": 3,
-                        "reason": "整合事项字段、外部信息和内部记忆生成旅行计划",
+                        "reason": "整合事项字段、外部信息和 MainAgent 注入的记忆上下文生成旅行计划",
                         "expected_output": "三天结构化旅行计划",
                     },
                 ],
@@ -740,8 +730,9 @@ Priority 3:
         if not identity_memory and not is_personal_memory_query and not is_preference_statement:
             return None
 
+        operation = "profile_update" if is_preference_statement else "query"
         return {
-            "reasoning": "用户询问或补充自己的长期偏好、历史行程或身份记忆，只需要调度记忆与偏好智能体。",
+            "reasoning": "用户询问或补充自己的长期偏好、历史行程或身份记忆，由 MainAgent 内部记忆能力处理，不调度业务子智能体。",
             "intents": [
                 {
                     "type": "memory",
@@ -752,14 +743,12 @@ Priority 3:
             ],
             "key_entities": {},
             "rewritten_query": query,
-            "agent_schedule": [
-                {
-                    "agent_name": "memory",
-                    "priority": 1,
-                    "reason": "读取或更新用户长期偏好、历史行程和行为反馈",
-                    "expected_output": "用户相关记忆或偏好处理结果",
-                }
-            ],
+            "direct_action": {
+                "type": "memory",
+                "operation": operation,
+                "reason": "读取或更新用户长期偏好、历史行程和行为反馈",
+            },
+            "agent_schedule": [],
         }
 
     def _try_current_trip_constraints(self, query: str) -> Optional[Dict[str, Any]]:
@@ -862,15 +851,9 @@ Priority 3:
                     "expected_output": "目的地 POI、路线、天气和预算相关外部数据",
                 },
                 {
-                    "agent_name": "memory",
-                    "priority": 2,
-                    "reason": "读取用户已有偏好，辅助判断预算和节奏是否冲突",
-                    "expected_output": "用户偏好、历史行程和行为反馈",
-                },
-                {
                     "agent_name": "plan",
                     "priority": 3,
-                    "reason": "按最新预算和节省约束生成或调整行程计划",
+                    "reason": "按最新预算、节省约束和 MainAgent 注入的记忆上下文生成或调整行程计划",
                     "expected_output": "符合约束的结构化旅行计划",
                 },
             ],
@@ -965,15 +948,9 @@ Priority 3:
                     "expected_output": "目的地 POI、天气、路线等外部数据",
                 },
                 {
-                    "agent_name": "memory",
-                    "priority": 2,
-                    "reason": "读取用户长期偏好、历史行程和行为反馈",
-                    "expected_output": "内部记忆信息",
-                },
-                {
                     "agent_name": "plan",
                     "priority": 3,
-                    "reason": "整合补齐后的事项、外部信息和内部记忆生成行程",
+                    "reason": "整合补齐后的事项、外部信息和 MainAgent 注入的记忆上下文生成行程",
                     "expected_output": "结构化旅行计划",
                 },
             ],

@@ -3,9 +3,9 @@ name: plan-trip
 description: TravelFlow Plan Agent skill. Use it to generate personalized trip itineraries from user preferences, clarified trip fields, and Search Agent data. It maps to the canonical agent name `plan`.
 ---
 
-# Plan Agent Skill
+# Plan Agent Capability
 
-该 Skill 是 TravelFlow 行程规划智能体的底层实现，对外调度名为 `plan`。
+该文件只描述 TravelFlow 行程规划能力。运行实现位于 `agents.plan_agent.ItineraryPlanningAgent`，对外调度名为 `plan`；旧路径 `plan-trip/script/agent.py` 仅做兼容导入。
 
 ## 输入依赖
 

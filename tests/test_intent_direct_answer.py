@@ -70,7 +70,6 @@ class IntentDirectAnswerTests(unittest.IsolatedAsyncioTestCase):
             [
                 ("clarification", 1),
                 ("search", 2),
-                ("memory", 2),
                 ("plan", 3),
             ],
             [(item["agent_name"], item["priority"]) for item in data["agent_schedule"]],
@@ -97,4 +96,14 @@ class IntentDirectAnswerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(300, data["key_entities"]["lodging_budget_per_night_min"])
         self.assertEqual(600, data["key_entities"]["lodging_budget_per_night_max"])
         self.assertNotIn("lodging_budget_per_night", data["key_entities"])
+        self.assertEqual([], model.calls)
+
+    async def test_memory_queries_use_direct_action_not_business_schedule(self):
+        model = ExplodingLLM()
+
+        data = await self.recognize("我的偏好是什么？", model=model)
+
+        self.assertEqual("memory", data["intents"][0]["type"])
+        self.assertEqual([], data["agent_schedule"])
+        self.assertEqual({"type": "memory", "operation": "query", "reason": "读取或更新用户长期偏好、历史行程和行为反馈"}, data["direct_action"])
         self.assertEqual([], model.calls)

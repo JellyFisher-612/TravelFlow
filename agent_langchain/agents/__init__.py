@@ -7,6 +7,9 @@ from .intent_recognition import IntentRecognition, IntentionAgent
 from .main_agent import MainAgent
 from .lazy_agent_registry import LazyAgentRegistry
 from .preference_agent import PreferenceAgent
+from .search_agent import InformationQueryAgent
+from .clarification_agent import EventCollectionAgent
+from .plan_agent import ItineraryPlanningAgent
 from .travelflow_agents import ClarificationAgent, MemoryAgent, PlanAgent, SearchAgent
 
 __all__ = [
@@ -21,4 +24,7 @@ __all__ = [
     'ClarificationAgent',
     'MemoryAgent',
     'PreferenceAgent',
+    'InformationQueryAgent',
+    'EventCollectionAgent',
+    'ItineraryPlanningAgent',
 ]

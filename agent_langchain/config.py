@@ -9,14 +9,57 @@ try:
 except Exception:
     pass
 
+MIMO_MODEL_NAME = "mimo-v2.5-pro"
+MIMO_BASE_URL = "https://api.xiaomimimo.com/v1"
+MIMO_TOKEN_PLAN_BASE_URL = "https://token-plan-cn.xiaomimimo.com/v1"
+DEEPSEEK_MODEL_NAME = "deepseek-v4-flash"
+DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1"
+
+
+def _default_mimo_base_url(api_key: str) -> str:
+    if api_key.startswith("tp-"):
+        return MIMO_TOKEN_PLAN_BASE_URL
+    return MIMO_BASE_URL
+
+
+def _resolve_llm_config(env=os.environ):
+    """Resolve the OpenAI-compatible LLM configuration.
+
+    MiMo is the preferred provider for this project. DeepSeek remains supported
+    as a compatibility fallback for existing local environments.
+    """
+
+    mimo_api_key = env.get("MIMO_API_KEY", "")
+    deepseek_api_key = env.get("DEEPSEEK_API_KEY", "")
+    api_key = mimo_api_key or deepseek_api_key
+
+    if mimo_api_key:
+        default_model = MIMO_MODEL_NAME
+        default_base_url = _default_mimo_base_url(mimo_api_key)
+    else:
+        default_model = DEEPSEEK_MODEL_NAME
+        default_base_url = DEEPSEEK_BASE_URL
+
+    model_name = env.get("LLM_MODEL_NAME", default_model)
+    base_url = env.get("LLM_BASE_URL", default_base_url)
+
+    if mimo_api_key:
+        if model_name == DEEPSEEK_MODEL_NAME:
+            model_name = default_model
+        if base_url == DEEPSEEK_BASE_URL:
+            base_url = default_base_url
+
+    return {
+        "api_key": api_key,
+        "model_name": model_name,
+        "base_url": base_url,
+        "temperature": float(env.get("LLM_TEMPERATURE", "0.7")),
+        "max_tokens": int(env.get("LLM_MAX_TOKENS", "8192")),
+    }
+
+
 # LLM Configuration
-LLM_CONFIG = {
-    "api_key": os.getenv("DEEPSEEK_API_KEY", ""),
-    "model_name": os.getenv("LLM_MODEL_NAME", "deepseek-v4-flash"),
-    "base_url": os.getenv("LLM_BASE_URL", "https://api.deepseek.com/v1"),
-    "temperature": float(os.getenv("LLM_TEMPERATURE", "0.7")),
-    "max_tokens": int(os.getenv("LLM_MAX_TOKENS", "8192")),
-}
+LLM_CONFIG = _resolve_llm_config()
 
 # System Configuration
 SYSTEM_CONFIG = {
