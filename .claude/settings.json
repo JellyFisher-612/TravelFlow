@@ -1,0 +1,34 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(grep -E '\\\\.pyc$|__pycache__')",
+      "Bash(git -C /home/users/lhy/TravelAgent/agent_langchain ls-files --others --ignored --exclude-standard)",
+      "Bash(git -C /home/users/lhy/TravelAgent/agent_langchain ls-files -- .vscode/ .codex .codex-loop/ codex_switch.sh test_loop/ scripts/ AGENTS.md)",
+      "Bash(git -C /home/users/lhy/TravelAgent/agent_langchain log --oneline --all -- agent_langchain/.env .env)",
+      "Bash(git -C /home/users/lhy/TravelAgent/agent_langchain show HEAD:agent_langchain/.env)",
+      "Bash(git checkout *)",
+      "Bash(git rm *)",
+      "Bash(python -m py_compile main.py)",
+      "Bash(python -m py_compile utils/json_parser.py)",
+      "Bash(python -m py_compile agents/travelflow_agents.py)",
+      "Bash(python -m py_compile agents/lazy_agent_registry.py)",
+      "Bash(/home/users/lhy/miniconda3/bin/python -m py_compile agent_langchain/main.py)",
+      "Bash(/home/users/lhy/miniconda3/bin/python -m py_compile agent_langchain/utils/json_parser.py)",
+      "Bash(/home/users/lhy/miniconda3/bin/python -m py_compile agent_langchain/agents/travelflow_agents.py)",
+      "Bash(/home/users/lhy/miniconda3/bin/python -m py_compile agent_langchain/agents/lazy_agent_registry.py)",
+      "Bash(/home/users/lhy/miniconda3/bin/python -m py_compile agent_langchain/cli.py)",
+      "Bash(/home/users/lhy/miniconda3/bin/python -m py_compile agent_langchain/query_orchestrator.py)",
+      "Bash(/home/users/lhy/miniconda3/bin/python -m pytest tests/ -v)",
+      "Bash(/home/users/lhy/miniconda3/envs/SPA/bin/python -m pytest tests/ -v)",
+      "Bash(PYTHONPATH=. /home/users/lhy/miniconda3/envs/SPA/bin/python -m pytest tests/ -v)",
+      "Bash(/home/users/lhy/miniconda3/envs/SPA/bin/python -m pytest ../tests/ -v)",
+      "Bash(PYTHONPATH=. /home/users/lhy/miniconda3/envs/SPA/bin/python -m pytest ../tests/ -v)",
+      "Bash(PYTHONPATH=. /home/users/lhy/miniconda3/envs/SPA/bin/python -m pytest /home/users/lhy/TravelAgent/agent_langchain/tests/ -v --rootdir=/home/users/lhy/TravelAgent/agent_langchain)",
+      "Bash(PYTHONPATH=/home/users/lhy/TravelAgent/agent_langchain/agent_langchain /home/users/lhy/miniconda3/envs/SPA/bin/python -m pytest /home/users/lhy/TravelAgent/agent_langchain/tests/ -v --rootdir=/home/users/lhy/TravelAgent/agent_langchain)",
+      "Bash(PYTHONPATH=/home/users/lhy/TravelAgent/agent_langchain/agent_langchain /home/users/lhy/miniconda3/envs/travel_agent/bin/python -m pytest /home/users/lhy/TravelAgent/agent_langchain/tests/ -v --rootdir=/home/users/lhy/TravelAgent/agent_langchain)",
+      "Bash(PYTHONPATH=/home/users/lhy/TravelAgent/agent_langchain/agent_langchain /home/users/lhy/miniconda3/envs/SPA_fix/bin/python -m pytest /home/users/lhy/TravelAgent/agent_langchain/tests/ -v --rootdir=/home/users/lhy/TravelAgent/agent_langchain)",
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)"
+    ]
+  }
+}

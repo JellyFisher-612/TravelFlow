@@ -7,6 +7,16 @@ from agents.intent_recognition import IntentRecognition
 from tests.fakes import ExplodingLLM, FailingTextLLM
 
 
+class JSONTextLLM:
+    def __init__(self, content: str) -> None:
+        self.content = content
+        self.calls = []
+
+    async def ainvoke(self, messages):
+        self.calls.append(messages)
+        return type("FakeResponse", (), {"content": self.content})()
+
+
 class IntentDirectAnswerTests(unittest.IsolatedAsyncioTestCase):
     async def recognize(self, query: str, model=None) -> dict:
         result = await IntentRecognition(model=model).run({"user_query": query})
@@ -18,6 +28,7 @@ class IntentDirectAnswerTests(unittest.IsolatedAsyncioTestCase):
             ("hello", "TravelFlow"),
             ("在吗", "我在"),
             ("你是谁？", "TravelFlow"),
+            ("你是做什么的", "旅行规划"),
             ("你能做什么？", "旅行规划"),
             ("谢谢", "不客气"),
             ("好的", "继续"),
@@ -107,3 +118,60 @@ class IntentDirectAnswerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([], data["agent_schedule"])
         self.assertEqual({"type": "memory", "operation": "query", "reason": "读取或更新用户长期偏好、历史行程和行为反馈"}, data["direct_action"])
         self.assertEqual([], model.calls)
+
+    async def test_llm_direct_answer_is_not_filled_with_default_search(self):
+        model = JSONTextLLM(
+            """
+            {
+              "reasoning": "用户询问助手功能，应直接回复。",
+              "intents": [
+                {
+                  "type": "system_function_inquiry",
+                  "confidence": 1.0,
+                  "description": "系统功能咨询",
+                  "reason": "用户询问助手的功能和角色。"
+                }
+              ],
+              "key_entities": {},
+              "rewritten_query": "用户询问 TravelFlow 旅游出行助手的功能和角色。",
+              "direct_answer": "我是 TravelFlow 旅游出行助手，可以帮你规划行程。",
+              "agent_schedule": []
+            }
+            """
+        )
+
+        data = await self.recognize("请说明当前系统的职责范围", model=model)
+
+        self.assertEqual([], data["agent_schedule"])
+        self.assertIn("TravelFlow", data["direct_answer"])
+        self.assertEqual(1, len(model.calls))
+
+    async def test_minimal_destination_request_does_not_inherit_trip_history_fields(self):
+        model = JSONTextLLM(
+            """
+            {
+              "reasoning": "历史中有南京行程，因此补全为历史行程。",
+              "intents": [{"type": "plan", "confidence": 0.9, "description": "规划", "reason": "用户想去南京"}],
+              "key_entities": {
+                "origin": "为我个",
+                "destination": "南京",
+                "start_date": "2026-05-03",
+                "duration_days": 4,
+                "budget_level": "经济型",
+                "pace_preference": "轻松"
+              },
+              "rewritten_query": "用户想从为我个出发，2026-05-03去南京玩4天。",
+              "agent_schedule": [
+                {"agent_name": "clarification", "priority": 1, "reason": "提取字段", "expected_output": "结构化行程字段"},
+                {"agent_name": "search", "priority": 2, "reason": "检索", "expected_output": "外部数据"},
+                {"agent_name": "plan", "priority": 3, "reason": "规划", "expected_output": "行程"}
+              ]
+            }
+            """
+        )
+
+        data = await self.recognize("我想去南京", model=model)
+
+        self.assertEqual("我想去南京", data["rewritten_query"])
+        self.assertEqual({"destination": "南京"}, data["key_entities"])
+        self.assertNotIn("为我个", data["rewritten_query"])

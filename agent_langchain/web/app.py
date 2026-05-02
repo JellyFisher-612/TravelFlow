@@ -12,20 +12,56 @@ from typing import Dict
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from cli import TravelFlowCLI
+from config import SYSTEM_CONFIG
 from context.long_term_memory import LongTermMemory
 from utils.langsmith_setup import setup_langsmith_tracing
 
 BASE_DIR = Path(__file__).resolve().parent
 TEMPLATE_DIR = BASE_DIR / "templates"
+MAX_CHAT_MESSAGE_CHARS = int(SYSTEM_CONFIG.get("max_chat_message_chars", 12000))
+
+OPENAPI_TAGS = [
+    {"name": "ui", "description": "Browser UI entrypoint."},
+    {"name": "chat", "description": "Chat execution APIs, including SSE streaming."},
+    {"name": "sessions", "description": "Persisted chat-log session browsing and deletion."},
+]
+
+SSE_EVENT_SCHEMA = {
+    "description": "Server-Sent Events stream. Each frame uses `event: <type>` and JSON `data:`.",
+    "content": {
+        "text/event-stream": {
+            "schema": {"type": "string"},
+            "examples": {
+                "delta": {
+                    "summary": "Assistant text chunk",
+                    "value": 'event: delta\ndata: {"text":"你好"}\n\n',
+                },
+                "done": {
+                    "summary": "Stream completion",
+                    "value": 'event: done\ndata: {"session_id":"abcd1234","user_id":"default_user","latency_ms":1200}\n\n',
+                },
+                "error": {
+                    "summary": "Stream error",
+                    "value": 'event: error\ndata: {"message":"处理失败"}\n\n',
+                },
+            },
+        }
+    },
+}
 
 
 class ChatRequest(BaseModel):
-    message: str
-    user_id: str = "default_user"
-    session_id: str | None = None
+    message: str = Field(
+        ...,
+        min_length=1,
+        max_length=MAX_CHAT_MESSAGE_CHARS,
+        description="User message. Whitespace-only messages are rejected after trimming.",
+    )
+    user_id: str = Field(default="default_user", min_length=1, max_length=128)
+    session_id: str | None = Field(default=None, max_length=128)
 
 
 class ChatResponse(BaseModel):
@@ -70,8 +106,21 @@ class SessionDetail(BaseModel):
     messages: list[SessionMessage]
 
 
-app = FastAPI(title="TravelFlow 旅游出行助手 Web")
+class DeleteSessionResponse(BaseModel):
+    ok: bool
+    session_id: str
+
+
+app = FastAPI(title="TravelFlow 旅游出行助手 Web", openapi_tags=OPENAPI_TAGS)
 _sessions: Dict[str, SessionState] = {}
+
+
+def _sse_frame(event: dict) -> str:
+    event_type = str(event.get("type") or "message")
+    payload = dict(event)
+    payload.pop("type", None)
+    data = json.dumps(payload, ensure_ascii=False)
+    return f"event: {event_type}\ndata: {data}\n\n"
 
 
 def _chunk_text(text: str, chunk_size: int = 2):
@@ -174,7 +223,7 @@ async def _get_or_create_session(user_id: str, session_id: str | None) -> tuple[
     return current_session_id, state
 
 
-@app.get("/", response_class=HTMLResponse)
+@app.get("/", response_class=HTMLResponse, tags=["ui"], summary="Render the browser chat UI")
 async def index() -> str:
     html_path = TEMPLATE_DIR / "index.html"
     if not html_path.exists():
@@ -182,7 +231,12 @@ async def index() -> str:
     return html_path.read_text(encoding="utf-8")
 
 
-@app.post("/api/chat", response_model=ChatResponse)
+@app.post(
+    "/api/chat",
+    response_model=ChatResponse,
+    tags=["chat"],
+    summary="Run one chat turn and return a complete JSON response",
+)
 async def chat(req: ChatRequest) -> ChatResponse:
     text = req.message.strip()
     if not text:
@@ -207,7 +261,12 @@ async def chat(req: ChatRequest) -> ChatResponse:
     )
 
 
-@app.post("/api/chat/stream")
+@app.post(
+    "/api/chat/stream",
+    tags=["chat"],
+    summary="Run one chat turn and stream events with SSE",
+    responses={200: SSE_EVENT_SCHEMA},
+)
 async def chat_stream(req: ChatRequest) -> StreamingResponse:
     text = req.message.strip()
     if not text:
@@ -278,14 +337,27 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                 event = await queue.get()
                 if event.get("type") == "eof":
                     break
-                yield json.dumps(event, ensure_ascii=False) + "\n"
+                yield _sse_frame(event)
         finally:
             await task
 
-    return StreamingResponse(event_generator(), media_type="application/x-ndjson")
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
-@app.get("/api/sessions", response_model=list[SessionListItem])
+@app.get(
+    "/api/sessions",
+    response_model=list[SessionListItem],
+    tags=["sessions"],
+    summary="List persisted chat-log sessions for a user",
+)
 async def list_sessions(user_id: str = "default_user") -> list[SessionListItem]:
     memory = LongTermMemory(user_id=user_id, storage_path="data/memory")
     chat_history = memory.get_chat_history(limit=None)
@@ -324,7 +396,12 @@ async def list_sessions(user_id: str = "default_user") -> list[SessionListItem]:
     return items
 
 
-@app.get("/api/sessions/{session_id}", response_model=SessionDetail)
+@app.get(
+    "/api/sessions/{session_id}",
+    response_model=SessionDetail,
+    tags=["sessions"],
+    summary="Get rendered messages for one chat-log session",
+)
 async def get_session_detail(session_id: str, user_id: str = "default_user") -> SessionDetail:
     memory = LongTermMemory(user_id=user_id, storage_path="data/memory")
     messages = memory.get_chat_history(limit=None, session_id=session_id)
@@ -355,8 +432,13 @@ async def get_session_detail(session_id: str, user_id: str = "default_user") -> 
     )
 
 
-@app.delete("/api/sessions/{session_id}")
-async def delete_session(session_id: str, user_id: str = "default_user") -> dict:
+@app.delete(
+    "/api/sessions/{session_id}",
+    response_model=DeleteSessionResponse,
+    tags=["sessions"],
+    summary="Delete one persisted chat-log session",
+)
+async def delete_session(session_id: str, user_id: str = "default_user") -> DeleteSessionResponse:
     memory = LongTermMemory(user_id=user_id, storage_path="data/memory")
     deleted_count = memory.delete_session(session_id)
     if deleted_count <= 0:
@@ -365,7 +447,7 @@ async def delete_session(session_id: str, user_id: str = "default_user") -> dict
     if session_id in _sessions:
         _sessions.pop(session_id, None)
 
-    return {"ok": True, "session_id": session_id}
+    return DeleteSessionResponse(ok=True, session_id=session_id)
 
 
 def main() -> None:

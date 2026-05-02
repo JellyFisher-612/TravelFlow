@@ -319,7 +319,7 @@ def _memory_operation(query: str) -> str:
     query_markers = ("什么", "哪些", "吗", "么", "有没有", "是多少", "怎么看", "查询", "查看", "告诉我")
     if _contains_any(query, query_markers):
         return "query"
-    update_markers = ("记住", "帮我记住", "以后", "下次", "长期", "我喜欢", "我不喜欢", "我偏好", "我的偏好是")
+    update_markers = ("记住", "帮我记住", "以后", "以后都", "下次", "长期", "平时", "通常", "每次", "我喜欢", "我不喜欢", "我偏好", "我的偏好是", "我的预算", "我的行程节奏")
     return "profile_update" if _contains_any(query, update_markers) else "query"
 
 
@@ -331,6 +331,15 @@ class PendingPlanSkill(WorkflowSkill):
         query = _query(state)
         pending_plan = state.get("pending_plan") if isinstance(state.get("pending_plan"), dict) else None
         if not query or not pending_plan:
+            return None
+
+        # If the user's input looks like a brand-new planning request
+        # (planning words + origin-destination movement), let it fall through
+        # to TravelPlanningSkill instead of merging into the old pending plan.
+        planning_words = ("规划", "安排", "行程", "路线", "旅游", "旅行", "出游", "自由行", "游玩", "玩")
+        has_new_planning = _contains_any(query, planning_words)
+        has_new_movement = re.search(r"从[一-龥A-Za-z]{1,20}(?:出发)?(?:去|到|前往)", query)
+        if has_new_planning and has_new_movement:
             return None
 
         supplement_markers = (
@@ -354,13 +363,13 @@ class PendingPlanSkill(WorkflowSkill):
         base_query = str(pending_plan.get("query") or "").strip()
         rewritten_query = f"{base_query}；补充信息：{query}" if base_query else query
         intention_data = {
-            "reasoning": "用户正在补充上一轮被阻断的行程规划信息，直接恢复规划工作流。",
+            "reasoning": "用户正在补充上一轮被阻断的行程规划信息；先回到事项收集，确认字段完整后才继续检索和规划。",
             "intents": [
                 {
                     "type": "plan",
                     "confidence": 0.95,
                     "description": "继续未完成的行程规划",
-                    "reason": "存在 pending_plan，且本轮输入是行程字段补充。",
+                    "reason": "存在 pending_plan，且本轮输入是行程字段补充；仍需由 clarification 校验核心字段是否完整。",
                 }
             ],
             "key_entities": _extract_trip_entities(query),
@@ -390,7 +399,11 @@ class TravelPlanningSkill(WorkflowSkill):
             query, ("明天", "后天", "下周", "周末", "五一", "十一", "春节", "暑假", "寒假")
         )
 
-        if not (has_planning_word and (has_destination_movement or has_duration_or_date)):
+        # Also match explicit travel-intent phrases like "想去/要去/打算去/计划去"
+        has_intent_phrase = bool(re.search(r"(?:想去|要去|打算去|计划去|准备去)", query))
+        has_destination = bool(re.search(r"(?:去|到|前往)[一-龥A-Za-z]{2,}", query))
+
+        if not (has_planning_word and (has_destination_movement or has_duration_or_date)) and not (has_intent_phrase and has_destination):
             return None
 
         workflow_plan = _planning_workflow_plan(self.name)
@@ -510,8 +523,8 @@ class MemoryProfileSkill(WorkflowSkill):
             return None
 
         identity_memory = _contains_any(query, ("我是谁", "知道我是谁", "认识我"))
-        personal_markers = ("我的", "我过去", "我以前", "我历史", "我去过", "我喜欢", "我不喜欢", "我偏好", "我常")
-        memory_targets = ("偏好", "喜好", "历史", "行程", "去过", "记录", "记得", "预算", "节奏", "酒店", "交通方式", "常住")
+        personal_markers = ("我的", "我过去", "我以前", "我历史", "我去过", "我喜欢", "我不喜欢", "我偏好", "我常", "下次", "以后", "记住", "帮我记住")
+        memory_targets = ("偏好", "喜好", "历史", "行程", "去过", "记录", "记得", "预算", "节奏", "酒店", "交通方式", "常住", "航空", "航班", "航空公司", "东航", "南航", "国航", "海航")
         is_personal_memory = _contains_any(query, personal_markers) and _contains_any(query, memory_targets)
 
         if not identity_memory and not is_personal_memory:

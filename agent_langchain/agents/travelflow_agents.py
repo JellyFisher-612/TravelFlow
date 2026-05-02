@@ -6,7 +6,6 @@ modules under ``agents/`` and memory support under ``context/``.
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any, Dict, List
 
@@ -77,16 +76,6 @@ class MemoryAgent:
             return await self._preference_agent.run(state)
 
         return self._query_memory(query, context)
-
-    def _parse_input(self, content: Any) -> Dict[str, Any]:
-        if isinstance(content, dict):
-            return content
-        if isinstance(content, str):
-            try:
-                return json.loads(content)
-            except json.JSONDecodeError:
-                return {"context": {"rewritten_query": content}}
-        return {"context": {"rewritten_query": str(content)}}
 
     def _is_preference_task(self, intents: List[Dict[str, Any]], query: str) -> bool:
         normalized_types = {

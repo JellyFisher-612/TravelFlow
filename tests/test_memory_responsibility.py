@@ -475,9 +475,15 @@ class MemoryResponsibilityTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(["clarification"], scheduler.executed_batches)
         self.assertTrue(scheduler.truncated)
+        self.assertEqual("帮我规划去北京玩三天", memory_manager.short_term.pending_plan[0])
+        self.assertEqual("clarification_missing_info", memory_manager.short_term.pending_plan[1]["reason"])
         self.assertEqual(
-            ("帮我规划去北京玩三天", {"reason": "clarification_missing_info"}),
-            memory_manager.short_term.pending_plan,
+            ["start_date", "budget_level", "pace_preference"],
+            memory_manager.short_term.pending_plan[1]["missing_info"],
+        )
+        self.assertEqual(
+            {"destination": "北京", "duration_days": 3},
+            memory_manager.short_term.pending_plan[1]["event_data"],
         )
         self.assertEqual(
             "clarification_missing_info",

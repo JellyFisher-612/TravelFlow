@@ -89,7 +89,6 @@ class LazyAgentRegistry:
             if skill_doc.exists():
                 self._skill_map[skill_dir.name] = skill_doc
                 
-        # self.console.print(f"[dim]已发现 {count} 个技能插件[/dim]")
 
     def _resolve_agent_name(self, agent_name: str) -> Optional[str]:
         """解析智能体名称到技能目录名"""

@@ -805,7 +805,10 @@
     async function streamChat(payload, onEvent) {
       const resp = await fetch('/api/chat/stream', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'text/event-stream'
+        },
         body: JSON.stringify(payload)
       });
 
@@ -821,23 +824,42 @@
       const decoder = new TextDecoder('utf-8');
       let buffer = '';
 
+      function dispatchSseFrame(frame) {
+        let eventType = 'message';
+        const dataLines = [];
+
+        for (const rawLine of frame.split(/\r?\n/)) {
+          if (!rawLine || rawLine.startsWith(':')) continue;
+          const separator = rawLine.indexOf(':');
+          const field = separator === -1 ? rawLine : rawLine.slice(0, separator);
+          let value = separator === -1 ? '' : rawLine.slice(separator + 1);
+          if (value.startsWith(' ')) value = value.slice(1);
+
+          if (field === 'event') eventType = value || 'message';
+          if (field === 'data') dataLines.push(value);
+        }
+
+        if (!dataLines.length) return;
+        const payload = JSON.parse(dataLines.join('\n'));
+        onEvent({ type: eventType, ...payload });
+      }
+
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
 
         buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
+        const frames = buffer.split(/\r?\n\r?\n/);
+        buffer = frames.pop() || '';
 
-        for (const line of lines) {
-          const text = line.trim();
-          if (!text) continue;
-          onEvent(JSON.parse(text));
+        for (const frame of frames) {
+          if (!frame.trim()) continue;
+          dispatchSseFrame(frame);
         }
       }
 
       if (buffer.trim()) {
-        onEvent(JSON.parse(buffer.trim()));
+        dispatchSseFrame(buffer);
       }
     }
 

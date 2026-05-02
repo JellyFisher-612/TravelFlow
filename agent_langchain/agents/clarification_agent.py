@@ -6,11 +6,11 @@
 from __future__ import annotations
 
 import importlib
-import json
 import logging
 import re
 from typing import Any, Dict, List, Optional
 
+from utils.llm_json import parse_json_text
 from utils.structured_output_guard import (
     is_structured_output_unavailable_error,
     mark_structured_output_unsupported,
@@ -204,6 +204,8 @@ class EventCollectionAgent:
             if compact_match:
                 origin = origin or self._clean_place(compact_match.group("origin"))
                 destination = destination or self._clean_place(compact_match.group("dest"))
+        if self._is_invalid_origin_candidate(origin):
+            origin = None
 
         city_origin, city_destination = self._extract_places_by_city_names(query)
         if city_origin and city_destination:
@@ -315,13 +317,19 @@ class EventCollectionAgent:
 
     def _clean_place(self, value: str) -> str:
         place = (value or "").strip()
-        place = re.sub(r"^(帮我|请|麻烦|规划|安排|下周|明天|后天|今天|从)", "", place).strip()
+        place = re.sub(r"^(帮我|请|麻烦|规划|安排|下周|明天|后天|今天|从|我想|我要|我想要|打算|计划)", "", place).strip()
         place = re.sub(
-            r"(出差|旅游|旅行|玩|游玩|行程|规划|安排|三天|两天|一天|\d+\s*天|[一二三四五六七八九十]+天|的.*|期间.*)",
+            r"(出差|旅游|旅行|玩|游玩|行程|规划|安排|三天|两天|一天|\d+\s*天|[一二三四五六七八九十]+天|之旅|之行|的行程|的旅行|的旅游|的出差|期间.*)",
             "",
             place,
         ).strip()
         return place
+
+    def _is_invalid_origin_candidate(self, value: Optional[str]) -> bool:
+        if not value:
+            return False
+        normalized = value.strip()
+        return normalized in {"我", "我想", "我要", "想", "想要", "打算", "计划", "帮我", "请帮我", "麻烦"}
 
     def _extract_budget_level(self, query: str) -> Optional[str]:
         if any(word in query for word in ("经济", "省钱", "便宜", "300元以内")):
@@ -329,6 +337,15 @@ class EventCollectionAgent:
         if any(word in query for word in ("舒适", "性价比", "300到600", "300-600")):
             return "舒适型"
         if any(word in query for word in ("品质", "高端", "600元以上", "不差钱")):
+            return "品质型"
+        # Infer from numeric budget amounts: "预算500元以内", "预算200"
+        budget_amount = re.search(r"预算[^0-9]*(\d+)\s*元?(?:以内|以下|内)?", query)
+        if budget_amount:
+            amount = int(budget_amount.group(1))
+            if amount <= 300:
+                return "经济型"
+            if amount <= 600:
+                return "舒适型"
             return "品质型"
         return None
 
@@ -436,6 +453,9 @@ class EventCollectionAgent:
         return None, None
 
     def _extract_duration_days(self, query: str) -> Optional[int]:
+        # "半天" / "半日" → 1 day (minimum unit for itinerary)
+        if "半天" in query or "半日" in query:
+            return 1
         digit_match = re.search(r"(\d+)\s*天", query)
         if digit_match:
             return int(digit_match.group(1))
@@ -461,9 +481,20 @@ class EventCollectionAgent:
         from datetime import datetime, timedelta
 
         today = datetime.now().date()
+
+        # "下周X" — specific weekday next week
+        weekday_map = {"一": 0, "二": 1, "三": 2, "四": 3, "五": 4, "六": 5, "日": 6, "天": 6}
+        next_weekday_match = re.search(r"下周([一二三四五六日天])", query)
+        if next_weekday_match:
+            target_wd = weekday_map[next_weekday_match.group(1)]
+            days_ahead = (target_wd - today.weekday()) % 7
+            if days_ahead == 0:
+                days_ahead = 7
+            return (today + timedelta(days=days_ahead)).isoformat()
+
         if "下周" in query:
-            days_until_next_monday = 7 - today.weekday()
-            if days_until_next_monday <= 0:
+            days_until_next_monday = (7 - today.weekday()) % 7
+            if days_until_next_monday == 0:
                 days_until_next_monday = 7
             return (today + timedelta(days=days_until_next_monday)).isoformat()
         if "明天" in query:
@@ -473,17 +504,23 @@ class EventCollectionAgent:
 
         iso_match = re.search(r"(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})", query)
         if iso_match:
-            year = int(iso_match.group(1))
-            month = int(iso_match.group(2))
-            day = int(iso_match.group(3))
-            return datetime(year, month, day).date().isoformat()
+            try:
+                year = int(iso_match.group(1))
+                month = int(iso_match.group(2))
+                day = int(iso_match.group(3))
+                return datetime(year, month, day).date().isoformat()
+            except ValueError:
+                return None
 
         date_match = re.search(r"(?:(20\d{2})年)?(\d{1,2})月(\d{1,2})日?", query)
         if date_match:
-            year = int(date_match.group(1) or today.year)
-            month = int(date_match.group(2))
-            day = int(date_match.group(3))
-            return datetime(year, month, day).date().isoformat()
+            try:
+                year = int(date_match.group(1) or today.year)
+                month = int(date_match.group(2))
+                day = int(date_match.group(3))
+                return datetime(year, month, day).date().isoformat()
+            except ValueError:
+                return None
         return None
 
     async def _invoke_structured(self, prompt: str) -> EventCollectionOutput:
@@ -505,24 +542,4 @@ class EventCollectionAgent:
 
         # fallback
         text = await ainvoke_text(self.model, [{"role": "user", "content": prompt}])
-        return EventCollectionOutput.model_validate(self._parse_json_text(str(text)))
-
-    @staticmethod
-    def _parse_json_text(text: str) -> Dict[str, Any]:
-        clean = text.strip()
-        if clean.startswith("```json"):
-            clean = clean[7:]
-        if clean.startswith("```"):
-            clean = clean[3:]
-        if clean.endswith("```"):
-            clean = clean[:-3]
-        clean = clean.strip()
-
-        try:
-            return json.loads(clean)
-        except json.JSONDecodeError:
-            start_idx = clean.find("{")
-            end_idx = clean.rfind("}")
-            if start_idx != -1 and end_idx != -1:
-                return json.loads(clean[start_idx : end_idx + 1])
-            raise
+        return EventCollectionOutput.model_validate(parse_json_text(str(text)))

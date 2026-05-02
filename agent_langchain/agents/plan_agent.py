@@ -9,6 +9,7 @@ import json
 import logging
 from typing import Any, Dict, List
 
+from utils.llm_json import parse_json_text
 from utils.structured_output_guard import (
     is_structured_output_unavailable_error,
     mark_structured_output_unsupported,
@@ -529,24 +530,4 @@ class ItineraryPlanningAgent:
                     logger.warning("Structured output failed, fallback to text parsing: %s", e)
 
         text = await ainvoke_text(self.model, [{"role": "user", "content": prompt}])
-        return ItineraryOutput.model_validate(self._parse_json_text(str(text)))
-
-    @staticmethod
-    def _parse_json_text(text: str) -> Dict[str, Any]:
-        clean = text.strip()
-        if clean.startswith("```json"):
-            clean = clean[7:]
-        if clean.startswith("```"):
-            clean = clean[3:]
-        if clean.endswith("```"):
-            clean = clean[:-3]
-        clean = clean.strip()
-
-        try:
-            return json.loads(clean)
-        except json.JSONDecodeError:
-            start_idx = clean.find("{")
-            end_idx = clean.rfind("}")
-            if start_idx != -1 and end_idx != -1:
-                return json.loads(clean[start_idx : end_idx + 1])
-            raise
+        return ItineraryOutput.model_validate(parse_json_text(str(text)))
