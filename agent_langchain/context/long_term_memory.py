@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -27,6 +27,9 @@ class LongTermMemory:
         self._redis = None
         self._cache_ttl = int(MEMORY_CONFIG.get("cache_ttl_sec", 3600))
         self._allow_json_fallback = bool(MEMORY_CONFIG.get("allow_json_fallback", True))
+        self._json_max_chat_messages = int(MEMORY_CONFIG.get("json_max_chat_messages", 2000))
+        self._json_chat_ttl_days = int(MEMORY_CONFIG.get("json_chat_ttl_days", 180))
+        self._json_max_bytes = int(MEMORY_CONFIG.get("json_max_bytes", 10 * 1024 * 1024))
 
         self._init_redis()
         self._init_postgres()
@@ -35,6 +38,7 @@ class LongTermMemory:
         if not self._pg and self._allow_json_fallback:
             Path(storage_path).mkdir(parents=True, exist_ok=True)
             self._json_data = self._load_json()
+            self._prune_json_chat_history(save=True)
 
         logger.info(
             "Long-term memory initialized for user=%s, backend=%s",
@@ -123,9 +127,16 @@ class LongTermMemory:
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             last_active TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             preview TEXT NOT NULL DEFAULT '',
+            summary TEXT NOT NULL DEFAULT '',
+            summary_updated_at TIMESTAMPTZ,
+            summary_message_count INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (user_id, session_id)
         );
         CREATE INDEX IF NOT EXISTS idx_session_user_active ON session_meta (user_id, last_active DESC);
+
+        ALTER TABLE session_meta ADD COLUMN IF NOT EXISTS summary TEXT NOT NULL DEFAULT '';
+        ALTER TABLE session_meta ADD COLUMN IF NOT EXISTS summary_updated_at TIMESTAMPTZ;
+        ALTER TABLE session_meta ADD COLUMN IF NOT EXISTS summary_message_count INTEGER NOT NULL DEFAULT 0;
         """
 
         with self._pg.cursor() as cur:
@@ -150,6 +161,60 @@ class LongTermMemory:
             },
         }
 
+    def _parse_timestamp(self, value: Any) -> Optional[datetime]:
+        if not value:
+            return None
+        try:
+            return datetime.fromisoformat(str(value).replace("Z", "+00:00")).replace(tzinfo=None)
+        except Exception:
+            return None
+
+    def _prune_json_chat_history(self, save: bool = False):
+        if self._pg or not self._allow_json_fallback or not self._json_data:
+            return
+
+        history = list(self._json_data.get("chat_history", []))
+        original_count = len(history)
+
+        if self._json_chat_ttl_days > 0:
+            cutoff = datetime.now() - timedelta(days=self._json_chat_ttl_days)
+            history = [
+                msg for msg in history
+                if (self._parse_timestamp(msg.get("timestamp")) or datetime.now()) >= cutoff
+            ]
+
+        if self._json_max_chat_messages > 0 and len(history) > self._json_max_chat_messages:
+            history = history[-self._json_max_chat_messages:]
+
+        self._json_data["chat_history"] = history
+        self._json_data.setdefault("statistics", {})["total_messages"] = len(history)
+        self._prune_empty_session_meta()
+
+        if self._json_max_bytes > 0:
+            while history and len(json.dumps(self._json_data, ensure_ascii=False).encode("utf-8")) > self._json_max_bytes:
+                history = history[1:]
+                self._json_data["chat_history"] = history
+                self._json_data.setdefault("statistics", {})["total_messages"] = len(history)
+                self._prune_empty_session_meta()
+
+        if save and len(history) != original_count:
+            self._save_json()
+
+    def _prune_empty_session_meta(self):
+        meta = self._json_data.get("session_meta")
+        if not isinstance(meta, dict):
+            return
+        active_sessions = {
+            msg.get("session_id")
+            for msg in self._json_data.get("chat_history", [])
+            if msg.get("session_id")
+        }
+        for sid in list(meta.keys()):
+            item = meta.get(sid, {})
+            has_summary = isinstance(item, dict) and item.get("summary")
+            if sid not in active_sessions and not has_summary:
+                meta.pop(sid, None)
+
     def _load_json(self) -> Dict[str, Any]:
         if not os.path.exists(self.db_path):
             return self._init_json_data()
@@ -169,6 +234,14 @@ class LongTermMemory:
                 data["behavior_feedback"] = []
             if "statistics" not in data:
                 data["statistics"] = {"total_trips": 0, "total_messages": 0, "frequent_destinations": {}}
+            for sid, meta in data.get("session_meta", {}).items():
+                if not isinstance(meta, dict):
+                    continue
+                meta.setdefault("session_id", sid)
+                meta.setdefault("user_id", self.user_id)
+                meta.setdefault("summary", "")
+                meta.setdefault("summary_updated_at", None)
+                meta.setdefault("summary_message_count", 0)
             return data
         except Exception as e:
             logger.error("Failed to load JSON fallback data: %s", e)
@@ -468,6 +541,7 @@ class LongTermMemory:
                 "metadata": metadata,
             }
         )
+        self._prune_json_chat_history()
         self._json_data["statistics"]["total_messages"] = len(self._json_data["chat_history"])
         self._save_json()
 
@@ -624,6 +698,9 @@ class LongTermMemory:
                 "created_at": now,
                 "last_active": now,
                 "preview": "",
+                "summary": "",
+                "summary_updated_at": None,
+                "summary_message_count": 0,
             }
             self._save_json()
 
@@ -657,23 +734,89 @@ class LongTermMemory:
 
             with self._pg.cursor() as cur:
                 cur.execute(
-                    "SELECT session_id, created_at, last_active, preview FROM session_meta WHERE user_id=%s",
+                    """
+                    SELECT session_id, created_at, last_active, preview,
+                           summary, summary_updated_at, summary_message_count
+                    FROM session_meta WHERE user_id=%s
+                    """,
                     (self.user_id,),
                 )
                 rows = cur.fetchall()
             result = {}
-            for sid, created_at, last_active, preview in rows:
+            for sid, created_at, last_active, preview, summary, summary_updated_at, summary_message_count in rows:
                 result[sid] = {
                     "session_id": sid,
                     "user_id": self.user_id,
                     "created_at": created_at.isoformat() if created_at else None,
                     "last_active": last_active.isoformat() if last_active else None,
                     "preview": preview or "",
+                    "summary": summary or "",
+                    "summary_updated_at": summary_updated_at.isoformat() if summary_updated_at else None,
+                    "summary_message_count": int(summary_message_count or 0),
                 }
             self._cache_set_json(self._session_meta_cache_key(), result)
             return result
 
         return self._json_data.get("session_meta", {})
+
+    def update_session_summary(self, session_id: str, summary: str, message_count: int):
+        """Persist an LLM summary for a chat-log session without promoting it to memory."""
+        summary = (summary or "").strip()
+        message_count = int(message_count or 0)
+        if self._pg:
+            with self._pg.cursor() as cur:
+                cur.execute(
+                    """
+                    INSERT INTO session_meta(
+                        user_id, session_id, created_at, last_active, preview,
+                        summary, summary_updated_at, summary_message_count
+                    )
+                    VALUES (%s, %s, NOW(), NOW(), '', %s, NOW(), %s)
+                    ON CONFLICT (user_id, session_id)
+                    DO UPDATE SET
+                        summary = EXCLUDED.summary,
+                        summary_updated_at = NOW(),
+                        summary_message_count = EXCLUDED.summary_message_count
+                    """,
+                    (self.user_id, session_id, summary, message_count),
+                )
+            self._cache_delete(self._session_meta_cache_key())
+            return
+
+        self.ensure_session_meta(session_id)
+        meta = self._json_data["session_meta"][session_id]
+        meta["summary"] = summary
+        meta["summary_updated_at"] = datetime.now().isoformat()
+        meta["summary_message_count"] = message_count
+        self._save_json()
+
+    def get_session_summary(self, session_id: str) -> Dict[str, Any]:
+        meta = self.get_session_meta_map().get(session_id, {})
+        return {
+            "session_id": session_id,
+            "summary": meta.get("summary", "") if isinstance(meta, dict) else "",
+            "summary_updated_at": meta.get("summary_updated_at") if isinstance(meta, dict) else None,
+            "summary_message_count": int(meta.get("summary_message_count", 0) or 0) if isinstance(meta, dict) else 0,
+        }
+
+    def get_session_summaries(self, limit: int = 5) -> List[Dict[str, Any]]:
+        metas = self.get_session_meta_map()
+        summaries = []
+        for sid, meta in metas.items():
+            if not isinstance(meta, dict) or not meta.get("summary"):
+                continue
+            summaries.append(
+                {
+                    "session_id": sid,
+                    "summary": meta.get("summary", ""),
+                    "summary_updated_at": meta.get("summary_updated_at"),
+                    "summary_message_count": int(meta.get("summary_message_count", 0) or 0),
+                    "last_active": meta.get("last_active"),
+                    "preview": meta.get("preview", ""),
+                }
+            )
+        summaries.sort(key=lambda item: item.get("last_active") or "", reverse=True)
+        return summaries[:limit] if limit else summaries
 
     def delete_session(self, session_id: str) -> int:
         """删除指定会话的聊天记录和元数据，返回删除消息数。"""

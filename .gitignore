@@ -1,5 +1,36 @@
-.codex-loop/current_prompt.md
-.codex-loop/logs/
-
+# Python
 __pycache__/
 *.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+
+# IDE / editor
+.vscode/
+.idea/
+
+# Codex tooling
+.codex
+.codex-loop/
+
+# OS
+.DS_Store
+
+# Node (MCP client)
+node_modules/
+
+# Logs
+*.log
+
+# Memory system debug artifacts
+data/memory/debug_*.json
+data/memory/codex_*.json
+
+# Redis data
+dump.rdb
+appendonlydir/

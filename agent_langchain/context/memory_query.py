@@ -67,11 +67,8 @@ class MemoryQueryAgent:
         if self.memory_manager:
             trip_history = self.memory_manager.long_term.get_trip_history(limit=50)
             preferences = self.memory_manager.long_term.get_preference()
-            try:
-                chat_summary = await self.memory_manager.get_long_term_summary_async(max_messages=30)
-            except Exception as e:
-                logger.warning("Failed to get chat summary: %s", e)
-                chat_summary = ""
+            if self._should_consult_chat_logs(user_query, trip_history):
+                chat_summary = self._load_chat_log_context()
 
         trip_text = self._format_trip_history(trip_history)
         pref_text = self._format_preferences(preferences)
@@ -91,8 +88,8 @@ class MemoryQueryAgent:
 【用户偏好】
 {pref_text}
 
-【历史对话摘要】
-{chat_summary if chat_summary else "（暂无历史对话摘要）"}
+【历史聊天日志】
+{chat_summary if chat_summary else "（默认不读取旧聊天日志；当前问题可由结构化记忆回答，或没有可用日志摘要）"}
 
 【任务说明】
 {skill_instruction}
@@ -109,7 +106,7 @@ class MemoryQueryAgent:
                 "memory_sources": {
                     "trip_count": len(trip_history),
                     "has_preferences": any(v for v in preferences.values() if v),
-                    "has_chat_summary": bool(chat_summary),
+                    "used_chat_logs": bool(chat_summary),
                 },
             }
             return result
@@ -117,6 +114,63 @@ class MemoryQueryAgent:
         except Exception as e:
             logger.error("Memory query failed: %s", e)
             return {"status": "error", "message": f"记忆查询失败: {str(e)}", "query": user_query}
+
+    def _should_consult_chat_logs(self, query: str, trip_history: List[Dict[str, Any]]) -> bool:
+        q = query or ""
+        explicit_chat_request = any(
+            marker in q
+            for marker in (
+                "聊天记录",
+                "对话记录",
+                "以前聊",
+                "之前聊",
+                "上次聊",
+                "说过什么",
+                "问过什么",
+                "我提到过",
+                "我们聊过",
+            )
+        )
+        if not explicit_chat_request:
+            return False
+
+        trip_only_request = any(
+            marker in q
+            for marker in ("历史行程", "过去行程", "去过哪里", "去过哪些", "旅行历史", "旅游历史")
+        )
+        if trip_only_request and trip_history:
+            return False
+        return True
+
+    def _load_chat_log_context(self) -> str:
+        long_term = getattr(self.memory_manager, "long_term", None)
+        if not long_term:
+            return ""
+
+        if hasattr(long_term, "get_session_summaries"):
+            current_session = getattr(self.memory_manager, "session_id", None)
+            summaries = long_term.get_session_summaries(limit=5)
+            if summaries:
+                return "\n".join(
+                    f"- {item.get('summary', '')}"
+                    for item in summaries
+                    if item.get("session_id") != current_session and item.get("summary")
+                )
+
+        current_session = getattr(self.memory_manager, "session_id", None)
+        logs = long_term.get_chat_history(limit=40)
+        lines = []
+        for msg in logs:
+            if msg.get("session_id") == current_session:
+                continue
+            role = str(msg.get("role", "unknown"))
+            content = str(msg.get("content", "") or "")
+            metadata = msg.get("metadata") if isinstance(msg.get("metadata"), dict) else {}
+            if role == "assistant" and metadata.get("display"):
+                content = str(metadata.get("display"))
+            if content.strip():
+                lines.append(f"{role}: {content.strip()[:500]}")
+        return "\n".join(lines[-20:])
 
     async def _invoke_structured_answer(self, prompt: str) -> MemoryAnswerOutput:
         lc_model = self.model

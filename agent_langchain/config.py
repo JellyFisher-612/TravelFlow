@@ -67,6 +67,7 @@ SYSTEM_CONFIG = {
     "log_level": "INFO",
     "max_retries": 3,
     "timeout": 60,  # Increased timeout for better stability
+    "max_chat_message_chars": int(os.getenv("MAX_CHAT_MESSAGE_CHARS", "12000")),
 }
 
 # 高德地图 API 配置（用于 POI/天气等查询）
@@ -107,4 +108,8 @@ MEMORY_CONFIG = {
     "cache_ttl_sec": int(os.getenv("MEMORY_CACHE_TTL_SEC", "3600")),
     # 当数据库不可用时，是否回退到本地 JSON（开发环境建议 True）
     "allow_json_fallback": os.getenv("ALLOW_JSON_FALLBACK", "true").lower() == "true",
+    # JSON fallback 只用于开发/降级，必须有自动清理边界。
+    "json_max_chat_messages": int(os.getenv("JSON_MEMORY_MAX_CHAT_MESSAGES", "2000")),
+    "json_chat_ttl_days": int(os.getenv("JSON_MEMORY_CHAT_TTL_DAYS", "180")),
+    "json_max_bytes": int(os.getenv("JSON_MEMORY_MAX_BYTES", str(10 * 1024 * 1024))),
 }

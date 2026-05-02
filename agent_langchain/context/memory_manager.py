@@ -323,6 +323,7 @@ class MemoryManager:
         prefs = context.get("user_preferences") or {}
         trips = context.get("trip_history") or []
         feedback = context.get("behavior_feedback") or []
+        chat_log_context = self._load_chat_log_context(query, trips)
 
         if any(word in (query or "") for word in ("我是谁", "知道我是谁", "认识我")):
             known = []
@@ -367,6 +368,8 @@ class MemoryManager:
             ]
             if feedback_lines:
                 answer_parts.append("行为反馈：" + "；".join(feedback_lines))
+        if chat_log_context:
+            answer_parts.append("历史聊天日志摘要：" + chat_log_context)
 
         return {
             "query": query,
@@ -374,7 +377,62 @@ class MemoryManager:
             "preferences": prefs,
             "trip_history": trips[:5] if isinstance(trips, list) else [],
             "behavior_feedback": feedback[:5] if isinstance(feedback, list) else [],
+            "used_chat_logs": bool(chat_log_context),
         }
+
+    def _load_chat_log_context(self, query: str, trip_history: Any) -> str:
+        if not self._should_consult_chat_logs(query, trip_history):
+            return ""
+
+        if hasattr(self.long_term, "get_session_summaries"):
+            summaries = self.long_term.get_session_summaries(limit=5)
+            summary_text = "；".join(
+                str(item.get("summary", "")).strip()
+                for item in summaries
+                if item.get("session_id") != self.session_id and str(item.get("summary", "")).strip()
+            )
+            if summary_text:
+                return summary_text
+
+        logs = self.long_term.get_chat_history(limit=40)
+        lines = []
+        for msg in logs:
+            if msg.get("session_id") == self.session_id:
+                continue
+            role = str(msg.get("role", "unknown"))
+            content = str(msg.get("content", "") or "")
+            metadata = msg.get("metadata") if isinstance(msg.get("metadata"), dict) else {}
+            if role == "assistant" and metadata.get("display"):
+                content = str(metadata.get("display"))
+            content = content.strip()
+            if content:
+                lines.append(f"{role}: {content[:300]}")
+        return "；".join(lines[-10:])
+
+    def _should_consult_chat_logs(self, query: str, trip_history: Any) -> bool:
+        q = query or ""
+        explicit_chat_request = any(
+            marker in q
+            for marker in (
+                "聊天记录",
+                "对话记录",
+                "以前聊",
+                "之前聊",
+                "上次聊",
+                "说过什么",
+                "问过什么",
+                "我提到过",
+                "我们聊过",
+            )
+        )
+        if not explicit_chat_request:
+            return False
+
+        trip_only_request = any(
+            marker in q
+            for marker in ("历史行程", "过去行程", "去过哪里", "去过哪些", "旅行历史", "旅游历史")
+        )
+        return not (trip_only_request and trip_history)
 
     def is_explicit_preference_update_result(self, result: Dict[str, Any]) -> bool:
         """
@@ -451,88 +509,95 @@ class MemoryManager:
         self.short_term.clear()
         logger.info(f"Session ended: {self.session_id}")
 
-    async def get_long_term_summary_async(self, max_messages: int = 50) -> str:
+    async def summarize_current_session_async(
+        self,
+        min_messages: int = 8,
+        min_new_messages: int = 6,
+        max_messages: int = 80,
+        force: bool = False,
+    ) -> str:
         """
-        使用LLM总结长期聊天历史（异步版本）
+        Summarize the current chat log and persist it on session metadata.
 
-        Args:
-            max_messages: 最多总结的消息数量
-
-        Returns:
-            总结后的文本
+        Chat logs are audit/history records, not runtime memory. This method is
+        intended for post-turn or session-end background work so user-facing
+        turns do not wait for summarization.
         """
         if not self.llm_model:
             return ""
 
-        # 获取长期聊天历史（排除当前会话）
-        all_history = self.long_term.get_chat_history(limit=max_messages)
-        history_from_other_sessions = [
-            msg for msg in all_history
-            if msg.get("session_id") != self.session_id
-        ]
-
-        # 获取行程历史
-        trip_history = self.long_term.get_trip_history(limit=20)
-
-        # 如果既没有聊天记录也没有行程记录，直接返回
-        if not history_from_other_sessions and not trip_history:
+        history = self.long_term.get_chat_history(limit=None, session_id=self.session_id)
+        message_count = len(history)
+        if message_count < min_messages:
             return ""
 
-        # 构建聊天记录文本
-        history_text = []
-        for msg in history_from_other_sessions[-max_messages:]:
-            role = msg.get("role", "unknown")
-            content = msg.get("content", "")
-            timestamp = msg.get("timestamp", "")
-            history_text.append(f"[{timestamp}] {role}: {content}")
+        summary_meta = {}
+        if hasattr(self.long_term, "get_session_summary"):
+            summary_meta = self.long_term.get_session_summary(self.session_id)
+        summarized_count = int(summary_meta.get("summary_message_count", 0) or 0)
+        if not force and summarized_count and message_count < summarized_count + min_new_messages:
+            return str(summary_meta.get("summary") or "")
 
-        history_str = "\n".join(history_text) if history_text else "（无聊天记录）"
+        selected_history = history[-max_messages:] if max_messages else history
+        history_str = self._format_chat_log_for_summary(selected_history)
+        if not history_str:
+            return ""
 
-        # 构建行程历史文本
-        trip_text = []
-        for trip in trip_history:
-            origin = trip.get("origin", "未知")
-            destination = trip.get("destination", "未知")
-            start_date = trip.get("start_date", "")
-            end_date = trip.get("end_date", "")
-            purpose = trip.get("purpose", "旅游")
-            timestamp = trip.get("timestamp", "")
+        prompt = f"""请为以下 TravelFlow 单个会话聊天日志生成简洁摘要。
 
-            if start_date and end_date:
-                trip_text.append(f"[{timestamp}] {origin} → {destination} ({start_date} 至 {end_date}) - {purpose}")
-            elif start_date:
-                trip_text.append(f"[{timestamp}] {origin} → {destination} ({start_date}) - {purpose}")
-            else:
-                trip_text.append(f"[{timestamp}] {origin} → {destination} - {purpose}")
+要求：
+1. 只总结本会话中对后续排查或用户主动查询旧对话有帮助的信息。
+2. 不要把摘要当作用户长期偏好，除非用户明确说“以后/长期/记住”。
+3. 保留用户明确评价、确认过的行程结论、重要约束变化。
+4. 不超过200字。
 
-        trip_str = "\n".join(trip_text) if trip_text else "（无行程记录）"
-
-        # 使用LLM总结
-        summarization_prompt = f"""请总结以下历史信息中的关键内容，包括：
-1. 用户的旅行偏好和习惯
-2. 用户询问过的重要问题
-3. 用户的出行历史和目的地
-4. 其他重要的上下文信息
-
-【历史聊天记录】
+【聊天日志】
 {history_str}
 
-【历史行程记录】
-{trip_str}
-
-请用简洁的语言总结（不超过200字）："""
+请输出摘要："""
 
         try:
-            summary = await ainvoke_text(self.llm_model, [{"role": "user", "content": summarization_prompt}])
-
-            logger.info(f"Generated long-term memory summary ({len(summary)} chars)")
-            return summary.strip()
-
+            summary = (await ainvoke_text(self.llm_model, [{"role": "user", "content": prompt}])).strip()
         except Exception as e:
-            logger.error(f"Failed to generate long-term summary: {e}")
-            import traceback
-            logger.error(f"Traceback: {traceback.format_exc()}")
+            logger.warning("Failed to summarize session chat log: %s", e)
             return ""
+
+        if summary and hasattr(self.long_term, "update_session_summary"):
+            self.long_term.update_session_summary(self.session_id, summary, message_count)
+            logger.info("Persisted session chat-log summary for %s (%s messages)", self.session_id, message_count)
+        return summary
+
+    def _format_chat_log_for_summary(self, history: List[Dict[str, Any]]) -> str:
+        lines = []
+        for msg in history:
+            role = str(msg.get("role", "unknown"))
+            content = str(msg.get("content", "") or "")
+            metadata = msg.get("metadata") if isinstance(msg.get("metadata"), dict) else {}
+            if role == "assistant" and metadata.get("display"):
+                content = str(metadata.get("display"))
+            timestamp = msg.get("timestamp", "")
+            content = content.strip()
+            if not content:
+                continue
+            lines.append(f"[{timestamp}] {role}: {content[:1000]}")
+        return "\n".join(lines)
+
+    async def get_long_term_summary_async(self, max_messages: int = 50) -> str:
+        """
+        Return persisted chat-log summaries only.
+
+        Long-term memory is represented by structured preferences, trip
+        history, and feedback. This compatibility method intentionally avoids
+        calling the LLM during a user turn.
+        """
+        if not hasattr(self.long_term, "get_session_summaries"):
+            return ""
+        summaries = [
+            item
+            for item in self.long_term.get_session_summaries(limit=max_messages)
+            if item.get("session_id") != self.session_id and item.get("summary")
+        ]
+        return "\n".join(f"- {item['summary']}" for item in summaries)
 
     def get_long_term_summary(self, max_messages: int = 50) -> str:
         """

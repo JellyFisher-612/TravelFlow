@@ -239,7 +239,7 @@ class MainAgent:
             "每次",
             "下次",
         )
-        preference_words = ("偏好", "喜欢", "不喜欢", "预算", "酒店", "交通方式", "节奏", "餐饮", "常住", "住在")
+        preference_words = ("偏好", "喜欢", "不喜欢", "预算", "酒店", "交通方式", "节奏", "餐饮", "常住", "住在", "航空", "航班", "航空公司", "东航", "南航", "国航", "海航", "轻松", "紧凑", "经济型", "舒适型", "品质型")
         return any(marker in q for marker in explicit_markers) and any(word in q for word in preference_words)
 
     async def _extract_preference_update(self, state: Dict[str, Any]) -> Dict[str, Any]:
@@ -423,10 +423,24 @@ class MainAgent:
     def _save_pending_plan(self, reason: str, graph_state: Dict[str, Any]):
         if not self.memory_manager:
             return
-        query = graph_state.get("intention_data", {}).get("rewritten_query", "")
+        query = graph_state.get("user_query") or graph_state.get("intention_data", {}).get("rewritten_query", "")
         if not query:
             return
-        self.memory_manager.short_term.set_pending_plan(query, {"reason": reason})
+        metadata: Dict[str, Any] = {"reason": reason}
+        for result in reversed(graph_state.get("results", [])):
+            if result.get("agent_name") not in {"clarification", "event_collection"}:
+                continue
+            data = result.get("result", {}).get("data", {})
+            if not isinstance(data, dict):
+                continue
+            metadata["missing_info"] = data.get("missing_info", [])
+            metadata["event_data"] = {
+                key: data.get(key)
+                for key in ("origin", "destination", "start_date", "duration_days", "budget_level", "pace_preference")
+                if data.get(key) not in (None, "")
+            }
+            break
+        self.memory_manager.short_term.set_pending_plan(query, metadata)
 
     def _blocking_reason_title(self, reason: str) -> str:
         return {

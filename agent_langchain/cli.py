@@ -8,7 +8,6 @@ import asyncio
 import sys
 import os
 import io
-import re
 from typing import Optional
 
 # 添加项目根目录到路径
@@ -24,14 +23,14 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.layout import Layout
 from rich.live import Live
 from rich.text import Text
-import json
 
 from config import LLM_CONFIG, RESILIENCE_CONFIG
 from context.memory_manager import MemoryManager
 from utils.circuit_breaker import CircuitBreaker, CircuitOpenError
 from utils.langchain_runtime import build_chat_model
 from utils.langsmith_setup import setup_langsmith_tracing
-from utils.llm_resilience import retry_with_backoff, run_health_check as check_llm_health
+from utils.llm_resilience import run_health_check as check_llm_health
+from query_orchestrator import QueryOrchestrator, should_skip_long_term_summary
 from agents.agent_scheduler import AgentScheduler
 from agents.intent_recognition import IntentRecognition
 from agents.main_agent import MainAgent
@@ -55,6 +54,7 @@ class TravelFlowCLI:
         self.model = None
         self._agent_cache = {}  # 智能体缓存
         self.circuit_breaker = None  # 在 initialize_system 中从 RESILIENCE_CONFIG 初始化
+        self.query_orchestrator = QueryOrchestrator(self)
         self._web_trace_events = []
         self._runtime_event_callback = None
 
@@ -197,119 +197,11 @@ class TravelFlowCLI:
 
     async def _execute_query(self, user_input: str) -> tuple[Optional[dict], Optional[str]]:
         """执行用户查询并返回结构化结果，不负责终端输出。"""
-        self._web_trace_events = []
-
-        # ---------- 熔断检查 ----------
-        if self.circuit_breaker:
-            try:
-                self.circuit_breaker.raise_if_open()
-            except CircuitOpenError:
-                return None, "服务暂时不可用，请稍后再试。"
-
-        rc = RESILIENCE_CONFIG
-        max_retries = rc.get("max_retries", 3)
-
-        # 1. 获取长期记忆摘要与上下文
-        long_term_summary = ""
-        if self._should_skip_long_term_summary(user_input):
-            self._emit_runtime_event("当前是普通对话，跳过长期记忆摘要。")
-        else:
-            self._emit_runtime_event("正在读取会话上下文和长期记忆...")
-            long_term_summary = await self._get_long_term_summary(user_input)
-        recent_context = self.memory_manager.short_term.get_recent_context(n_turns=5)
-        context_messages = []
-        if long_term_summary:
-            context_messages.append({"role": "system", "content": long_term_summary})
-        for msg in recent_context:
-            context_messages.append({"role": msg["role"], "content": msg["content"]})
-        context_messages.append({"role": "user", "content": user_input})
-
-        shared_state = {
-            "user_id": self.user_id,
-            "session_id": self.session_id,
-            "user_query": user_input,
-            "pending_plan": self.memory_manager.short_term.get_pending_plan(),
-            "messages": context_messages,
-            "context": {},
-            "results": [],
-        }
-
-        # The entry layer owns turn-level chat persistence. MainAgent only
-        # understands and delegates the request.
-        self.memory_manager.add_message("user", user_input)
-        shared_state["_user_message_recorded"] = True
-
-        # 2. 主智能体处理当前用户回合：理解需求，直接回复或委托业务智能体。
-        try:
-            main_result = await retry_with_backoff(
-                lambda: self.main_agent.run(shared_state),
-                max_retries=max_retries,
-                base_delay_sec=rc.get("retry_base_delay_sec", 1.0),
-                max_delay_sec=rc.get("retry_max_delay_sec", 30.0),
-            )
-            if self.circuit_breaker:
-                self.circuit_breaker.record_success()
-        except CircuitOpenError:
-            return None, "服务暂时不可用，请稍后再试。"
-        except Exception:
-            if self.circuit_breaker:
-                self.circuit_breaker.record_failure()
-            raise
-
-        result_data = main_result.get("final_result") or {"error": "解析结果失败"}
-
-        # 7. 更新记忆（保留结构化数据，同时存可展示文本便于历史回放）
-        assistant_display = ""
-        try:
-            assistant_display = self.render_result_text(result_data)
-        except Exception:
-            assistant_display = ""
-        self.memory_manager.add_message(
-            "assistant",
-            json.dumps(result_data, ensure_ascii=False),
-            metadata={"display": assistant_display} if assistant_display else None,
-        )
-        self._emit_runtime_event("✅ 结果已生成")
-        return result_data, None
+        return await self.query_orchestrator.execute_query(user_input)
 
     def _should_skip_long_term_summary(self, user_input: str) -> bool:
-        """Avoid unnecessary LLM summarization for short meta/chat turns."""
-        query = (user_input or "").strip().lower()
-        if not query:
-            return True
-        if any(phrase in query for phrase in ("我是谁", "知道我是谁", "认识我")):
-            return False
-        normalized = re.sub(r"[\s\ufeff\u200b]+", "", query)
-        normalized = re.sub(r"[。！？!?，,、；;：:\"'“”‘’（）()\[\]{}<>《》~～.]+$", "", normalized)
-        normalized = re.sub(r"^[。！？!?，,、；;：:\"'“”‘’（）()\[\]{}<>《》~～.]+", "", normalized)
-        exact_meta = {
-            "你好",
-            "您好",
-            "hello",
-            "hi",
-            "嗨",
-            "你是谁",
-            "你是啥",
-            "你叫什么",
-            "你叫什么名字",
-            "你是什么",
-            "你能做什么",
-            "你会做什么",
-            "你可以做什么",
-            "你有什么功能",
-            "怎么用",
-        }
-        if normalized in exact_meta:
-            return True
-        return any(
-            phrase in query
-            for phrase in (
-                "介绍一下你自己",
-                "你是一个什么",
-                "你是干什么的",
-                "这个系统怎么用",
-            )
-        )
+        """Compatibility wrapper for older tests/callers."""
+        return should_skip_long_term_summary(user_input)
 
     def _emit_intention_chain(self, intention_data: dict):
         """Emit user-facing orchestration reasoning without exposing hidden chain-of-thought."""
@@ -447,7 +339,7 @@ class TravelFlowCLI:
     async def _get_long_term_summary(self, user_input: str = "") -> str:
         """
         生成长期记忆摘要，用于传递给 MainAgent 的 IntentRecognition
-        使用LLM总结历史聊天记录 + 结构化偏好
+        只使用结构化长期记忆；旧聊天记录仅作为日志，不在用户轮次中读取或总结。
 
         Args:
             user_input: 用户输入，用于筛选相关历史行程
@@ -475,13 +367,7 @@ class TravelFlowCLI:
             if len(pref_lines) > 1:
                 summary_parts.extend(pref_lines)
 
-        # 2. 使用LLM总结历史聊天记录
-        chat_summary = await self.memory_manager.get_long_term_summary_async(max_messages=50)
-        if chat_summary:
-            summary_parts.append("\n【历史会话总结】")
-            summary_parts.append(chat_summary)
-
-        # 3. 智能筛选相关历史行程
+        # 2. 智能筛选相关历史行程
         all_trips = self.memory_manager.long_term.get_trip_history(limit=None)
         if all_trips:
             # 筛选相关的行程（地点匹配）
@@ -514,6 +400,18 @@ class TravelFlowCLI:
                     summary_parts.append(
                         f"{i}. {relevance_mark}{origin} → {destination} ({start_date}) - {purpose}"
                     )
+
+        # 3. 行为反馈是结构化长期记忆，可作为规划约束或质量参考。
+        feedback = self.memory_manager.long_term.get_behavior_feedback(limit=3)
+        if feedback:
+            summary_parts.append("\n【用户历史反馈】")
+            for item in feedback[-3:]:
+                if isinstance(item, dict):
+                    value = item.get("feedback", item)
+                else:
+                    value = item
+                if value:
+                    summary_parts.append(f"• {value}")
 
         return "\n".join(summary_parts) if summary_parts else ""
 

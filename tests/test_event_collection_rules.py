@@ -33,6 +33,20 @@ class EventCollectionRuleTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("budget_level", result["missing_info"])
         self.assertEqual([], model.calls)
 
+    async def test_minimal_destination_does_not_extract_desire_as_origin(self):
+        agent_cls = load_event_collection_agent_class()
+        model = ExplodingLLM()
+        agent = agent_cls(model=model)
+
+        result = await agent.run({"context": {"rewritten_query": "我想去南京"}})
+
+        self.assertIsNone(result["origin"])
+        self.assertEqual("南京", result["destination"])
+        self.assertIn("origin", result["missing_info"])
+        self.assertIn("start_date", result["missing_info"])
+        self.assertIn("duration_days", result["missing_info"])
+        self.assertEqual([], model.calls)
+
 
 if __name__ == "__main__":
     unittest.main()
