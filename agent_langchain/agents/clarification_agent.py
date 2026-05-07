@@ -17,6 +17,7 @@ from utils.structured_output_guard import (
     should_attempt_structured_output,
 )
 from utils.langchain_runtime import ainvoke_text
+from utils.budget_utils import detect_budget_level, detect_lodging_budget
 
 logger = logging.getLogger(__name__)
 
@@ -367,43 +368,17 @@ class EventCollectionAgent:
         return normalized in {"我", "我想", "我要", "想", "想要", "打算", "计划", "帮我", "请帮我", "麻烦"}
 
     def _extract_budget_level(self, query: str) -> Optional[str]:
-        if any(word in query for word in ("经济", "省钱", "便宜", "300元以内")):
-            return "经济型"
-        if any(word in query for word in ("舒适", "性价比", "300到600", "300-600")):
-            return "舒适型"
-        if any(word in query for word in ("品质", "高端", "600元以上", "不差钱")):
-            return "品质型"
-        # Infer from numeric budget amounts: "预算500元以内", "预算200"
-        budget_amount = re.search(r"预算[^0-9]*(\d+)\s*元?(?:以内|以下|内)?", query)
-        if budget_amount:
-            amount = int(budget_amount.group(1))
-            if amount <= 300:
-                return "经济型"
-            if amount <= 600:
-                return "舒适型"
-            return "品质型"
-        return None
+        return detect_budget_level(query)
 
     def _extract_lodging_budget(self, query: str) -> Optional[Dict[str, int]]:
-        range_match = re.search(
-            r"(?:住宿|酒店|每晚)[^0-9一二三四五六七八九十百千万]*(\d+)\s*(?:到|至|-|~|－|—)\s*(\d+)\s*元?",
-            query,
-        )
-        if range_match:
-            low = int(range_match.group(1))
-            high = int(range_match.group(2))
-            return {"min": min(low, high), "max": max(low, high)}
-
-        max_match = re.search(r"(?:住宿|酒店|每晚)[^0-9一二三四五六七八九十百千万]*(\d+)\s*元?(?:以内|以下|内)", query)
-        if max_match:
-            value = int(max_match.group(1))
-            return {"value": value, "max": value}
-
-        min_match = re.search(r"(?:住宿|酒店|每晚)[^0-9一二三四五六七八九十百千万]*(\d+)\s*元?(?:以上|起)", query)
-        if min_match:
-            return {"min": int(min_match.group(1))}
-
-        return None
+        min_value, max_value = detect_lodging_budget(query)
+        if min_value is None and max_value is None:
+            return None
+        if min_value is not None and max_value is not None:
+            return {"min": min_value, "max": max_value}
+        if max_value is not None:
+            return {"value": max_value, "max": max_value}
+        return {"min": min_value}
 
     def _extract_meal_budget_preference(self, query: str) -> Optional[str]:
         if any(word in query for word in ("餐饮", "吃饭", "美食")) and any(word in query for word in ("节省", "省钱", "性价比")):

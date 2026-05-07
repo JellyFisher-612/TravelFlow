@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional, Union
 
 from utils.langchain_runtime import ainvoke_text
 from utils.llm_json import parse_json_text
+from utils.budget_utils import detect_budget_level
 from utils.structured_output_guard import (
     is_structured_output_unavailable_error,
     mark_structured_output_unsupported,
@@ -116,12 +117,9 @@ class PreferenceAgent:
 
         preferences: List[Dict[str, Any]] = []
         if "预算偏好" in query or "预算" in query:
-            if "经济" in query or "300元以内" in query:
-                preferences.append({"type": "budget_level", "value": "经济型", "action": "replace"})
-            elif "舒适" in query or "300到600" in query or "性价比" in query:
-                preferences.append({"type": "budget_level", "value": "舒适型", "action": "replace"})
-            elif "品质" in query or "600元以上" in query:
-                preferences.append({"type": "budget_level", "value": "品质型", "action": "replace"})
+            budget_level = detect_budget_level(query)
+            if budget_level:
+                preferences.append({"type": "budget_level", "value": budget_level, "action": "replace"})
 
         if "节奏" in query or "不要太赶" in query or "多看" in query:
             if "轻松" in query or "不要太赶" in query:

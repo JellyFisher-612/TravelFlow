@@ -9,6 +9,7 @@ from typing import Any, Dict, List
 
 from utils.json_parser import robust_json_parse
 from utils.langchain_runtime import ainvoke_text
+from utils.budget_utils import detect_budget_level, infer_budget_profile
 from utils.structured_output_guard import (
     is_structured_output_unavailable_error,
     mark_structured_output_unsupported,
@@ -195,13 +196,14 @@ class TripSearchPlannerMixin:
             ("shopping", ("购物", "商场", "买东西", "伴手礼")),
             ("nightlife", ("夜游", "夜生活", "酒吧", "夜景")),
             ("rain_backup", ("下雨", "雨天", "室内", "天气不好")),
-            ("budget", ("省钱", "经济", "便宜", "预算低", "平价")),
-            ("premium", ("高端", "品质", "豪华", "舒适", "预算充足")),
             ("accessibility", ("无障碍", "轮椅", "婴儿车", "少走路")),
         ]
         for tag, words in keyword_rules:
             if any(word in q for word in words):
                 focus_tags.append(tag)
+        budget_profile = infer_budget_profile(str(event_data.get("budget_level") or detect_budget_level(q) or ""))
+        if budget_profile:
+            focus_tags.append(budget_profile)
 
         must_verify = ["destination_pois", "weather"]
         hard_constraints = []
@@ -490,4 +492,3 @@ class TripSearchPlannerMixin:
         if any(word in q for word in ("飞机", "航班", "自驾", "开车")) and not any(word in q for word in ("高铁", "火车", "动车", "12306")):
             return False
         return True
-
