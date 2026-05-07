@@ -11,8 +11,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
+from fastapi.responses import JSONResponse
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from starlette.middleware.cors import CORSMiddleware
@@ -51,7 +52,7 @@ SSE_EVENT_SCHEMA = {
                 },
                 "error": {
                     "summary": "Stream error",
-                    "value": 'event: error\ndata: {"message":"处理失败"}\n\n',
+                    "value": 'event: error\ndata: {"error":"处理失败","detail":null,"code":"stream_error"}\n\n',
                 },
             },
         }
@@ -80,6 +81,14 @@ class ChatResponse(BaseModel):
     reply: str
     latency_ms: int
     trace: list[str] = []
+
+
+class ErrorResponse(BaseModel):
+    """Unified API error payload."""
+
+    error: str
+    detail: str | None = None
+    code: str | None = None
 
 
 class SessionState:
@@ -148,10 +157,35 @@ app.add_middleware(
 _sessions: Dict[str, SessionState] = {}
 
 
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException):
+    error = exc.detail if isinstance(exc.detail, str) else json.dumps(exc.detail, ensure_ascii=False)
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"error": error, "detail": None, "code": str(exc.status_code)},
+    )
+
+
+@app.exception_handler(Exception)
+async def general_exception_handler(request: Request, exc: Exception):
+    logger.error(f"Unhandled exception: {exc}", exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={"error": "内部服务器错误", "detail": str(exc), "code": "500"},
+    )
+
+
 def _sse_frame(event: dict) -> str:
     event_type = str(event.get("type") or "message")
     payload = dict(event)
     payload.pop("type", None)
+    if event_type == "error":
+        message = payload.pop("error", payload.pop("message", "流式响应错误"))
+        payload = {
+            "error": str(message),
+            "detail": payload.pop("detail", None),
+            "code": str(payload.pop("code", "stream_error")),
+        }
     data = json.dumps(payload, ensure_ascii=False)
     return f"event: {event_type}\ndata: {data}\n\n"
 
@@ -364,7 +398,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                 })
             except Exception as e:
                 logger.warning("Streaming chat query failed: %s", e, exc_info=True)
-                queue.put_nowait({"type": "error", "message": str(e)})
+                queue.put_nowait({"type": "error", "error": str(e), "detail": None, "code": "stream_error"})
             finally:
                 if state:
                     state.cli.set_runtime_event_callback(None)
