@@ -343,10 +343,12 @@ class IntentRuleEngine:
 
         # Match explicit travel-intent phrases like "想去/要去/打算去/计划去"
         if re.search(r"(?:想去|要去|打算去|计划去|准备去)[一-龥A-Za-z]{2,}", query):
+            destination = self._extract_destination_from_current_query(query)
+            key_entities = {"destination": destination} if destination else {}
             return {
                 "reasoning": "用户表达明确出行意向（想去/要去/打算去），按行程规划流程处理。",
                 "intents": [{"type": "plan", "confidence": 0.95, "description": "旅行行程规划", "reason": "用户明确表达出行意向。"}],
-                "key_entities": {},
+                "key_entities": key_entities,
                 "rewritten_query": query,
                 "agent_schedule": [
                     {"agent_name": "clarification", "priority": 1, "reason": "提取出发地、目的地、时间和天数", "expected_output": "结构化行程字段"},
