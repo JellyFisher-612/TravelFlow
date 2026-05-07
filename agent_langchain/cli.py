@@ -419,294 +419,340 @@ class TravelFlowCLI:
         """
         根据结果生成人性化的回复
         """
+        return self._format_agent_results(results)
+
+    def _format_agent_results(self, results: list, all_results: Optional[list] = None) -> bool:
+        """格式化各业务智能体执行结果。"""
         has_output = False
+        all_results = all_results if all_results is not None else results
+        has_itinerary = any(r.get("agent_name") in {"plan", "itinerary_planning"} for r in all_results)
+        has_completed_plan = any(
+            r.get("agent_name") in {"plan", "itinerary_planning"}
+            and isinstance(r.get("data"), dict)
+            and r.get("data", {}).get("planning_complete") is True
+            for r in all_results
+        )
 
         for result in results:
             agent_name = result.get("agent_name", "")
             status = result.get("status", "")
             data = result.get("data", {})
-            current_agent_shown = False  # 标记当前Agent是否有内容展示
 
             # 处理失败的智能体
             if status == "error":
-                error_msg = data.get("error", "未知错误")
-                agent_display_name = self._get_agent_display_name(agent_name)
-                self.console.print(f"❌ {agent_display_name}执行失败: {error_msg}", style="red")
-                has_output = True
+                has_output = self._format_error_section([result]) or has_output
                 continue
 
             # 只处理成功的智能体。
             if status != "success":
                 continue
 
-            # --- 特定 Agent 处理 ---
-
-            # 行程规划
+            current_agent_shown = False
             if agent_name in {"plan", "itinerary_planning"}:
-                if data.get("planning_complete") is False and any(
-                    r.get("agent_name") in {"plan", "itinerary_planning"}
-                    and isinstance(r.get("data"), dict)
-                    and r.get("data", {}).get("planning_complete") is True
-                    for r in results
-                ):
+                if data.get("planning_complete") is False and has_completed_plan:
                     continue
-                itinerary = data.get("itinerary")
-                # 增强：支持从 data.data.itinerary 获取
-                if not itinerary and "data" in data and isinstance(data["data"], dict):
-                    itinerary = data["data"].get("itinerary")
-                
-                if itinerary:
-                    title = itinerary.get('title', '行程规划')
-                    self.console.print(f"\n✈️  [bold cyan]{title}[/bold cyan]")
-                    self.console.print(f"时长: {itinerary.get('duration', '未知')}\n")
-
-                    hard_constraints = itinerary.get("hard_constraints") or []
-                    if hard_constraints:
-                        self.console.print("[bold]必须先核验的硬约束[/bold]")
-                        for item in hard_constraints:
-                            if not isinstance(item, dict):
-                                continue
-                            name = item.get("name", "核验项")
-                            status = item.get("status", "needs_official_check")
-                            action = item.get("action", "")
-                            self.console.print(f"  • {name} [{status}]")
-                            if action:
-                                self.console.print(f"    {action}", style="dim")
-                        self.console.print()
-
-                    budget = itinerary.get("budget_estimate") or {}
-                    if isinstance(budget, dict) and budget.get("items"):
-                        self.console.print("[bold]预算粗估[/bold]")
-                        for item in budget.get("items", []):
-                            if isinstance(item, dict):
-                                self.console.print(f"  • {item.get('name', '')}: {item.get('range', '')}")
-                        if budget.get("note"):
-                            self.console.print(f"  {budget['note']}", style="dim")
-                        self.console.print()
-
-                    # 每日行程
-                    for day_plan in itinerary.get("daily_plans", []):
-                        day_num = day_plan.get("day", 1)
-                        self.console.print(f"[bold yellow]第 {day_num} 天[/bold yellow]")
-
-                        # 兼容 activities 和 time_slots
-                        activities = day_plan.get("activities") or day_plan.get("time_slots") or []
-                        for slot in activities:
-                            time = slot.get("time", "")
-                            # 兼容 activity 和 location
-                            activity = slot.get("activity") or slot.get("location") or ""
-                            description = slot.get("description", "")
-                            transport = slot.get("transport", "")
-
-                            self.console.print(f"  {time} - {activity}")
-                            if description:
-                                self.console.print(f"    {description}", style="dim")
-                            if transport:
-                                self.console.print(f"    🚇 {transport}", style="dim")
-
-                        # 餐食建议
-                        meals = day_plan.get("meals", {})
-                        if meals:
-                            self.console.print()
-                            if meals.get("lunch"):
-                                self.console.print(f"  🍜 {meals['lunch']}", style="dim")
-                            if meals.get("dinner"):
-                                self.console.print(f"  🍽️  {meals['dinner']}", style="dim")
-                        self.console.print()
-
-                    fallbacks = itinerary.get("fallback_options") or []
-                    if fallbacks:
-                        self.console.print("[bold]备选方案[/bold]")
-                        for item in fallbacks:
-                            if isinstance(item, dict):
-                                self.console.print(f"  • {item.get('scenario', '情况')}: {item.get('option', '')}")
-                        self.console.print()
-
-                    # 注意事项
-                    notes = itinerary.get("notes", [])
-                    if notes:
-                        self.console.print("[bold]📌 注意事项[/bold]")
-                        for note in notes:
-                            self.console.print(f"  • {note}")
-                    current_agent_shown = True
-
-            # 偏好管理
+                current_agent_shown = self._format_travel_plan(data)
+            elif agent_name in {"intent", "intent_recognition", "intention", "intention_agent"}:
+                current_agent_shown = self._format_intent_section(data)
             elif agent_name in {"memory", "preference"} and data.get("preferences") is not None:
-                raw_prefs = data.get("preferences")
-                # 增强：支持从 data.data.preferences 获取
-                if not raw_prefs and "data" in data and isinstance(data["data"], dict):
-                    raw_prefs = data["data"].get("preferences")
-
-                if isinstance(raw_prefs, dict):
-                    prefs_list = raw_prefs.get("preferences", [])
-                else:
-                    prefs_list = raw_prefs if isinstance(raw_prefs, list) else []
-
-                if prefs_list:
-                    self.console.print("✓ [bold green]已更新您的偏好设置[/bold green]")
-                    type_names = {
-                        "home_location": "常驻地",
-                        "transportation_preference": "交通偏好",
-                        "hotel_brands": "酒店偏好",
-                        "airlines": "航空公司偏好",
-                        "seat_preference": "座位偏好",
-                        "meal_preference": "餐食偏好",
-                        "budget_level": "预算等级"
-                    }
-                    for pref in prefs_list:
-                        pref_type = pref.get("type", "")
-                        pref_value = pref.get("value", "")
-                        action = pref.get("action", "replace")
-                        display_type = type_names.get(pref_type, pref_type)
-                        action_text = "追加" if action == "append" else "设置为"
-                        self.console.print(f"  • {display_type} {action_text} [cyan]{pref_value}[/cyan]")
-                    current_agent_shown = True
-                    has_itinerary = any(r.get("agent_name") in {"plan", "itinerary_planning"} for r in results)
-                    if not has_itinerary:
-                        self.console.print("\n💡 下次规划行程时会参考这些偏好。", style="dim")
-                else:
-                    # 检查是否有错误信息
-                    err = data.get("error", "")
-                    if err:
-                        self.console.print(f"偏好未保存: {err}", style="yellow")
-                        current_agent_shown = True
-                    # 如果只是没提取到，可能就是没偏好，不强求显示，交给兜底逻辑
-
-            # 事项收集
+                current_agent_shown = self._format_preference_update(data, has_itinerary)
             elif agent_name in {"clarification", "event_collection"}:
-                # 增强：支持从 data.data 获取
-                origin = data.get("origin") or data.get("data", {}).get("origin")
-                destination = data.get("destination") or data.get("data", {}).get("destination")
-                start_date = data.get("start_date") or data.get("data", {}).get("start_date")
-                end_date = data.get("end_date") or data.get("data", {}).get("end_date")
-                budget_level = data.get("budget_level") or data.get("data", {}).get("budget_level")
-                pace_preference = data.get("pace_preference") or data.get("data", {}).get("pace_preference")
-                missing_info = data.get("missing_info") or data.get("data", {}).get("missing_info") or []
-                summary = data.get("summary") or data.get("data", {}).get("summary")
-
-                has_itinerary = any(r.get("agent_name") in {"plan", "itinerary_planning"} for r in results)
-                info_shown = False
-                if not has_itinerary:
-                    known_parts = []
-                    if origin:
-                        known_parts.append(f"从{origin}出发")
-                    if destination:
-                        known_parts.append(f"去{destination}")
-                    if start_date:
-                        known_parts.append(f"{start_date}出发")
-                    if end_date:
-                        known_parts.append(f"{end_date}返程")
-                    if budget_level:
-                        known_parts.append(f"{budget_level}预算")
-                    if pace_preference:
-                        known_parts.append(f"{pace_preference}节奏")
-
-                    if known_parts:
-                        self.console.print(f"\n我先确认一下：你想{('，'.join(known_parts))}。")
-                    elif summary:
-                        self.console.print(f"\n{summary}")
-                    else:
-                        self.console.print("\n我可以继续帮你规划，不过还需要先确认几个关键信息。")
-                    info_shown = True
-
-                if missing_info:
-                    readable_missing = [self._format_missing_field(item) for item in missing_info]
-                    self.console.print(f"\n为了把行程安排具体，我还需要你补充：{'、'.join(readable_missing)}。", style="yellow")
-                    example = self._build_missing_info_example(missing_info)
-                    if example:
-                        self.console.print(f"你可以直接在下面的表单补充，也可以回复：{example}。")
-                    else:
-                        self.console.print("你可以直接在下面的表单补充，我会继续规划。")
-                    if any(item in {"budget_level", "pace_preference"} for item in missing_info):
-                        self.console.print("也可以先点下面的预算或节奏选项，我会继续追问剩下的信息。")
-                    info_shown = True
-                
-                if info_shown:
-                    current_agent_shown = True
-
-            # 信息查询
+                current_agent_shown = self._format_clarification_section(data, has_itinerary)
             elif agent_name in {"search", "information_query"}:
-                query_results = data.get("results")
-                if not query_results and "data" in data and isinstance(data["data"], dict):
-                    query_results = data["data"].get("results")
-                if not query_results:
-                    query_results = data # 兜底：data 本身就是 results
-
-                if not isinstance(query_results, dict):
-                    query_results = {}
-
-                summary = query_results.get("summary", "")
-                sources = query_results.get("sources", []) or []
-                message = query_results.get("message", "")
-                error = query_results.get("error", "")
-
-                if summary:
-                    self.console.print(f"\n{summary}")
-                    current_agent_shown = True
-                elif message:
-                    self.console.print(f"\n{message}", style="dim")
-                    current_agent_shown = True
-                elif error:
-                    self.console.print(f"\n{error}", style="yellow")
-                    current_agent_shown = True
-
-                if sources:
-                    self.console.print("\n[bold]参考来源[/bold]")
-                    for i, source in enumerate(sources[:3], 1):
-                        if isinstance(source, dict):
-                            label = source.get("url") or source.get("title") or str(source)
-                        else:
-                            label = str(source)
-                        self.console.print(f"  {i}. {label}", style="dim")
-                    current_agent_shown = True
-
-            # 记忆查询
+                current_agent_shown = self._format_search_section(data)
             elif agent_name in {"memory", "memory_query"}:
-                query_result = data.get("answer") or data.get("result") or data.get("content")
-                if not query_result and "data" in data and isinstance(data["data"], dict):
-                    inner = data["data"]
-                    query_result = inner.get("answer") or inner.get("result") or inner.get("content")
+                current_agent_shown = self._format_memory_section(data, has_itinerary)
 
-                has_itinerary = any(r.get("agent_name") in {"plan", "itinerary_planning"} for r in results)
-                if query_result and not has_itinerary:
-                    self.console.print(f"\n{query_result}")
-                    current_agent_shown = True
-                elif data.get("follow_up_question") and not has_itinerary:
-                    self.console.print(f"\n{data['follow_up_question']}", style="dim")
-                    current_agent_shown = True
-
-            # --- 通用兜底 (如果特定逻辑未生效) ---
             if not current_agent_shown:
-                # 尝试查找通用字段
-                common_keys = ["answer", "content", "result", "message", "summary", "text", "description"]
-                fallback_content = ""
-                
-                # 扁平查找
-                for k in common_keys:
-                    if k in data and isinstance(data[k], str) and data[k].strip():
-                        fallback_content = data[k]
-                        break
-                
-                # 嵌套查找 data.data
-                if not fallback_content and "data" in data and isinstance(data["data"], dict):
-                    for k in common_keys:
-                        if k in data["data"] and isinstance(data["data"][k], str) and data["data"][k].strip():
-                            fallback_content = data["data"][k]
-                            break
-
-                if fallback_content:
-                    self.console.print(f"\n{fallback_content}")
-                    current_agent_shown = True
-                else:
-                    # 实在啥也没有，打印个成功标记，避免完全静默
-                    agent_display_name = self._get_agent_display_name(agent_name)
-                    self.console.print(f"✓ {agent_display_name}已完成", style="green")
-                    current_agent_shown = True
+                current_agent_shown = self._format_generic_agent_result(agent_name, data)
 
             if current_agent_shown:
                 has_output = True
 
         return has_output
+
+    def _format_intent_section(self, intent_data: dict) -> bool:
+        """格式化意图识别结果。"""
+        if not isinstance(intent_data, dict):
+            return False
+
+        direct_answer = intent_data.get("direct_answer") or intent_data.get("message")
+        if direct_answer and direct_answer != "没有可调度的智能体":
+            self.console.print(f"\n{direct_answer}")
+            return True
+        return False
+
+    def _format_travel_plan(self, plan_data: dict) -> bool:
+        """格式化行程规划输出。"""
+        itinerary = plan_data.get("itinerary")
+        if not itinerary and "data" in plan_data and isinstance(plan_data["data"], dict):
+            itinerary = plan_data["data"].get("itinerary")
+
+        if not itinerary:
+            return False
+
+        title = itinerary.get('title', '行程规划')
+        self.console.print(f"\n✈️  [bold cyan]{title}[/bold cyan]")
+        self.console.print(f"时长: {itinerary.get('duration', '未知')}\n")
+        self._format_hard_constraints(itinerary.get("hard_constraints") or [])
+        self._format_budget_estimate(itinerary.get("budget_estimate") or {})
+        self._format_daily_plans(itinerary.get("daily_plans", []))
+        self._format_fallback_options(itinerary.get("fallback_options") or [])
+        self._format_plan_notes(itinerary.get("notes", []))
+        return True
+
+    def _format_hard_constraints(self, hard_constraints: list) -> None:
+        if not hard_constraints:
+            return
+
+        self.console.print("[bold]必须先核验的硬约束[/bold]")
+        for item in hard_constraints:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name", "核验项")
+            status = item.get("status", "needs_official_check")
+            action = item.get("action", "")
+            self.console.print(f"  • {name} [{status}]")
+            if action:
+                self.console.print(f"    {action}", style="dim")
+        self.console.print()
+
+    def _format_budget_estimate(self, budget: dict) -> None:
+        if not isinstance(budget, dict) or not budget.get("items"):
+            return
+
+        self.console.print("[bold]预算粗估[/bold]")
+        for item in budget.get("items", []):
+            if isinstance(item, dict):
+                self.console.print(f"  • {item.get('name', '')}: {item.get('range', '')}")
+        if budget.get("note"):
+            self.console.print(f"  {budget['note']}", style="dim")
+        self.console.print()
+
+    def _format_daily_plans(self, daily_plans: list) -> None:
+        for day_plan in daily_plans:
+            day_num = day_plan.get("day", 1)
+            self.console.print(f"[bold yellow]第 {day_num} 天[/bold yellow]")
+
+            activities = day_plan.get("activities") or day_plan.get("time_slots") or []
+            for slot in activities:
+                time = slot.get("time", "")
+                activity = slot.get("activity") or slot.get("location") or ""
+                description = slot.get("description", "")
+                transport = slot.get("transport", "")
+
+                self.console.print(f"  {time} - {activity}")
+                if description:
+                    self.console.print(f"    {description}", style="dim")
+                if transport:
+                    self.console.print(f"    🚇 {transport}", style="dim")
+
+            meals = day_plan.get("meals", {})
+            if meals:
+                self.console.print()
+                if meals.get("lunch"):
+                    self.console.print(f"  🍜 {meals['lunch']}", style="dim")
+                if meals.get("dinner"):
+                    self.console.print(f"  🍽️  {meals['dinner']}", style="dim")
+            self.console.print()
+
+    def _format_fallback_options(self, fallbacks: list) -> None:
+        if not fallbacks:
+            return
+
+        self.console.print("[bold]备选方案[/bold]")
+        for item in fallbacks:
+            if isinstance(item, dict):
+                self.console.print(f"  • {item.get('scenario', '情况')}: {item.get('option', '')}")
+        self.console.print()
+
+    def _format_plan_notes(self, notes: list) -> None:
+        if not notes:
+            return
+
+        self.console.print("[bold]📌 注意事项[/bold]")
+        for note in notes:
+            self.console.print(f"  • {note}")
+
+    def _format_memory_section(self, memory_data: dict, has_itinerary: bool = False) -> bool:
+        """格式化记忆查询结果。"""
+        query_result = memory_data.get("answer") or memory_data.get("result") or memory_data.get("content")
+        if not query_result and "data" in memory_data and isinstance(memory_data["data"], dict):
+            inner = memory_data["data"]
+            query_result = inner.get("answer") or inner.get("result") or inner.get("content")
+
+        if query_result and not has_itinerary:
+            self.console.print(f"\n{query_result}")
+            return True
+        if memory_data.get("follow_up_question") and not has_itinerary:
+            self.console.print(f"\n{memory_data['follow_up_question']}", style="dim")
+            return True
+        return False
+
+    def _format_preference_update(self, memory_data: dict, has_itinerary: bool = False) -> bool:
+        """格式化偏好写入结果。"""
+        raw_prefs = memory_data.get("preferences")
+        if not raw_prefs and "data" in memory_data and isinstance(memory_data["data"], dict):
+            raw_prefs = memory_data["data"].get("preferences")
+
+        if isinstance(raw_prefs, dict):
+            prefs_list = raw_prefs.get("preferences", [])
+        else:
+            prefs_list = raw_prefs if isinstance(raw_prefs, list) else []
+
+        if not prefs_list:
+            err = memory_data.get("error", "")
+            if err:
+                self.console.print(f"偏好未保存: {err}", style="yellow")
+                return True
+            return False
+
+        self.console.print("✓ [bold green]已更新您的偏好设置[/bold green]")
+        type_names = {
+            "home_location": "常驻地",
+            "transportation_preference": "交通偏好",
+            "hotel_brands": "酒店偏好",
+            "airlines": "航空公司偏好",
+            "seat_preference": "座位偏好",
+            "meal_preference": "餐食偏好",
+            "budget_level": "预算等级"
+        }
+        for pref in prefs_list:
+            pref_type = pref.get("type", "")
+            pref_value = pref.get("value", "")
+            action = pref.get("action", "replace")
+            display_type = type_names.get(pref_type, pref_type)
+            action_text = "追加" if action == "append" else "设置为"
+            self.console.print(f"  • {display_type} {action_text} [cyan]{pref_value}[/cyan]")
+        if not has_itinerary:
+            self.console.print("\n💡 下次规划行程时会参考这些偏好。", style="dim")
+        return True
+
+    def _format_clarification_section(self, data: dict, has_itinerary: bool) -> bool:
+        origin = data.get("origin") or data.get("data", {}).get("origin")
+        destination = data.get("destination") or data.get("data", {}).get("destination")
+        start_date = data.get("start_date") or data.get("data", {}).get("start_date")
+        end_date = data.get("end_date") or data.get("data", {}).get("end_date")
+        budget_level = data.get("budget_level") or data.get("data", {}).get("budget_level")
+        pace_preference = data.get("pace_preference") or data.get("data", {}).get("pace_preference")
+        missing_info = data.get("missing_info") or data.get("data", {}).get("missing_info") or []
+        summary = data.get("summary") or data.get("data", {}).get("summary")
+
+        info_shown = False
+        if not has_itinerary:
+            known_parts = []
+            if origin:
+                known_parts.append(f"从{origin}出发")
+            if destination:
+                known_parts.append(f"去{destination}")
+            if start_date:
+                known_parts.append(f"{start_date}出发")
+            if end_date:
+                known_parts.append(f"{end_date}返程")
+            if budget_level:
+                known_parts.append(f"{budget_level}预算")
+            if pace_preference:
+                known_parts.append(f"{pace_preference}节奏")
+
+            if known_parts:
+                self.console.print(f"\n我先确认一下：你想{('，'.join(known_parts))}。")
+            elif summary:
+                self.console.print(f"\n{summary}")
+            else:
+                self.console.print("\n我可以继续帮你规划，不过还需要先确认几个关键信息。")
+            info_shown = True
+
+        if missing_info:
+            readable_missing = [self._format_missing_field(item) for item in missing_info]
+            self.console.print(f"\n为了把行程安排具体，我还需要你补充：{'、'.join(readable_missing)}。", style="yellow")
+            example = self._build_missing_info_example(missing_info)
+            if example:
+                self.console.print(f"你可以直接在下面的表单补充，也可以回复：{example}。")
+            else:
+                self.console.print("你可以直接在下面的表单补充，我会继续规划。")
+            if any(item in {"budget_level", "pace_preference"} for item in missing_info):
+                self.console.print("也可以先点下面的预算或节奏选项，我会继续追问剩下的信息。")
+            info_shown = True
+
+        return info_shown
+
+    def _format_search_section(self, data: dict) -> bool:
+        query_results = data.get("results")
+        if not query_results and "data" in data and isinstance(data["data"], dict):
+            query_results = data["data"].get("results")
+        if not query_results:
+            query_results = data
+
+        if not isinstance(query_results, dict):
+            query_results = {}
+
+        summary = query_results.get("summary", "")
+        sources = query_results.get("sources", []) or []
+        message = query_results.get("message", "")
+        error = query_results.get("error", "")
+        shown = False
+
+        if summary:
+            self.console.print(f"\n{summary}")
+            shown = True
+        elif message:
+            self.console.print(f"\n{message}", style="dim")
+            shown = True
+        elif error:
+            self.console.print(f"\n{error}", style="yellow")
+            shown = True
+
+        if sources:
+            self.console.print("\n[bold]参考来源[/bold]")
+            for i, source in enumerate(sources[:3], 1):
+                if isinstance(source, dict):
+                    label = source.get("url") or source.get("title") or str(source)
+                else:
+                    label = str(source)
+                self.console.print(f"  {i}. {label}", style="dim")
+            shown = True
+
+        return shown
+
+    def _format_error_section(self, errors: list) -> bool:
+        """格式化智能体错误信息。"""
+        shown = False
+        for error in errors:
+            if isinstance(error, dict):
+                agent_name = error.get("agent_name", "")
+                data = error.get("data", {})
+                error_msg = data.get("error", "未知错误") if isinstance(data, dict) else str(data)
+            else:
+                agent_name = ""
+                error_msg = str(error)
+
+            agent_display_name = self._get_agent_display_name(agent_name)
+            self.console.print(f"❌ {agent_display_name}执行失败: {error_msg}", style="red")
+            shown = True
+        return shown
+
+    def _format_generic_agent_result(self, agent_name: str, data: dict) -> bool:
+        common_keys = ["answer", "content", "result", "message", "summary", "text", "description"]
+        fallback_content = ""
+
+        for k in common_keys:
+            if k in data and isinstance(data[k], str) and data[k].strip():
+                fallback_content = data[k]
+                break
+
+        if not fallback_content and "data" in data and isinstance(data["data"], dict):
+            for k in common_keys:
+                if k in data["data"] and isinstance(data["data"][k], str) and data["data"][k].strip():
+                    fallback_content = data["data"][k]
+                    break
+
+        if fallback_content:
+            self.console.print(f"\n{fallback_content}")
+            return True
+
+        agent_display_name = self._get_agent_display_name(agent_name)
+        self.console.print(f"✓ {agent_display_name}已完成", style="green")
+        return True
 
     def _get_agent_display_name(self, agent_name: str) -> str:
         """获取智能体的显示名称"""
