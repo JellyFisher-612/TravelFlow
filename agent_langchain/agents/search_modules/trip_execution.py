@@ -33,17 +33,50 @@ class TripSearchExecutionMixin:
         refinement_requests: List[Dict[str, Any]] | None = None,
     ) -> Dict[str, Any]:
         """针对行程规划场景生成检索计划，并调用垂直工具返回结构化素材包。"""
+        query_context = await self._build_trip_search_query(
+            {
+                "event_data": event_data,
+                "user_query": user_query,
+                "refinement_requests": refinement_requests or [],
+            }
+        )
+        raw_results = await self._execute_trip_search(query_context)
+        parsed_results = self._parse_trip_results({**query_context, **raw_results})
+        support_results = await self._query_trip_support(query_context, parsed_results)
+        return self._format_trip_response({**parsed_results, **support_results})
+
+    async def _build_trip_search_query(self, context: Dict[str, Any]) -> Dict[str, Any]:
+        """构建行程检索上下文。"""
+        event_data = context.get("event_data") or {}
+        user_query = context.get("user_query") or ""
+        refinement_requests = context.get("refinement_requests") or []
 
         destination = (event_data.get("destination") or "").strip()
         if not destination:
             raise ValueError("event_data 中缺少 destination 字段，无法进行行程信息查询")
 
         amap = self._new_amap_service()
-        search_plan = await self._build_trip_search_plan(event_data, user_query, refinement_requests or [])
+        search_plan = await self._build_trip_search_plan(event_data, user_query, refinement_requests)
+        poi_tasks = search_plan.get("tasks_by_type", {}).get("poi_search", [])
+        return {
+            "event_data": event_data,
+            "user_query": user_query,
+            "refinement_requests": refinement_requests,
+            "destination": destination,
+            "amap": amap,
+            "search_plan": search_plan,
+            "poi_tasks": poi_tasks,
+        }
+
+    async def _execute_trip_search(self, query_context: Dict[str, Any]) -> Dict[str, Any]:
+        destination = query_context["destination"]
+        amap = query_context["amap"]
+        search_plan = query_context["search_plan"]
+        user_query = query_context.get("user_query") or ""
+        poi_tasks = query_context.get("poi_tasks") or []
 
         geocodes_task = asyncio.create_task(amap.maps_geo(address=destination))
         weather_task = asyncio.create_task(amap.maps_weather(city=destination))
-        poi_tasks = search_plan.get("tasks_by_type", {}).get("poi_search", [])
 
         async def query_keyword(keyword: str) -> tuple[str, List[Dict[str, Any]]]:
             try:
@@ -56,6 +89,29 @@ class TripSearchExecutionMixin:
             *[query_keyword(str(task.get("keywords", ""))) for task in poi_tasks[:10]]
         )
 
+        geocodes = await self._await_amap_result(geocodes_task, "geocode", destination)
+        weather = await self._await_amap_result(weather_task, "weather", destination)
+        transport = await self._execute_transport_tasks(search_plan, user_query)
+        supplemental_search = await self._execute_supplemental_trip_search(search_plan, destination)
+
+        return {
+            "poi_query_results": poi_query_results,
+            "geocodes": geocodes,
+            "weather": weather,
+            "transport": transport,
+            "supplemental_search": supplemental_search,
+        }
+
+    async def _await_amap_result(self, task: asyncio.Task, query_type: str, destination: str) -> Any:
+        try:
+            return await task
+        except Exception as e:
+            logger.warning("Amap %s query failed for %s: %s", query_type, destination, e)
+            return {"error": str(e)}
+
+    def _parse_trip_results(self, raw_results: Dict[str, Any]) -> Dict[str, Any]:
+        """解析并校验行程检索原始结果。"""
+        poi_query_results = raw_results.get("poi_query_results") or []
         pois: List[Dict[str, Any]] = []
         pois_by_category: Dict[str, List[Dict[str, Any]]] = {}
         seen_poi_ids = set()
@@ -73,23 +129,47 @@ class TripSearchExecutionMixin:
                 pois.append(poi)
             pois_by_category[keywords] = category_items[:10]
 
-        try:
-            geocodes = await geocodes_task
-        except Exception as e:
-            logger.warning("Amap geocode query failed for %s: %s", destination, e)
-            geocodes = {"error": str(e)}
+        return {
+            "event_data": raw_results.get("event_data") or {},
+            "user_query": raw_results.get("user_query") or "",
+            "refinement_requests": raw_results.get("refinement_requests") or [],
+            "destination": raw_results.get("destination") or "",
+            "amap": raw_results.get("amap"),
+            "search_plan": raw_results.get("search_plan") or {},
+            "poi_tasks": raw_results.get("poi_tasks") or [],
+            "transport": raw_results.get("transport") or {},
+            "geocodes": raw_results.get("geocodes"),
+            "weather": raw_results.get("weather"),
+            "pois": pois,
+            "pois_by_category": pois_by_category,
+            "supplemental_search": raw_results.get("supplemental_search") or [],
+        }
 
-        try:
-            weather = await weather_task
-        except Exception as e:
-            logger.warning("Amap weather query failed for %s: %s", destination, e)
-            weather = {"error": str(e)}
+    async def _query_trip_support(
+        self,
+        query_context: Dict[str, Any],
+        parsed_results: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        amap = query_context["amap"]
+        destination = query_context["destination"]
+        pois = parsed_results.get("pois") or []
+        pois_by_category = parsed_results.get("pois_by_category") or {}
 
-        transport = await self._execute_transport_tasks(search_plan, user_query)
         selected_scenic = self._select_scenic_pois(pois_by_category, pois)
         nearby = await self._query_nearby_trip_support(amap, destination, selected_scenic)
         routes, distances = await self._query_trip_routes(amap, pois_by_category, pois)
+        return {
+            "selected_scenic": selected_scenic,
+            "nearby": nearby,
+            "routes": routes,
+            "distances": distances,
+        }
 
+    async def _execute_supplemental_trip_search(
+        self,
+        search_plan: Dict[str, Any],
+        destination: str,
+    ) -> List[Dict[str, Any]]:
         supplemental_search: List[Dict[str, Any]] = []
         for request in search_plan.get("tasks_by_type", {}).get("web_search", [])[:4]:
             keywords = str(request.get("keywords") or request.get("query") or "").strip()
@@ -113,6 +193,25 @@ class TripSearchExecutionMixin:
                     "trust_level": web_result.get("trust_level", "unknown") if isinstance(web_result, dict) else "unknown",
                 }
             )
+        return supplemental_search
+
+    def _format_trip_response(self, parsed_results: Dict[str, Any]) -> Dict[str, Any]:
+        """格式化行程检索最终响应。"""
+        event_data = parsed_results["event_data"]
+        destination = parsed_results["destination"]
+        search_plan = parsed_results["search_plan"]
+        transport = parsed_results["transport"]
+        geocodes = parsed_results["geocodes"]
+        weather = parsed_results["weather"]
+        pois = parsed_results["pois"]
+        pois_by_category = parsed_results["pois_by_category"]
+        selected_scenic = parsed_results["selected_scenic"]
+        nearby = parsed_results["nearby"]
+        routes = parsed_results["routes"]
+        distances = parsed_results["distances"]
+        supplemental_search = parsed_results["supplemental_search"]
+        refinement_requests = parsed_results["refinement_requests"]
+        poi_tasks = parsed_results["poi_tasks"]
 
         search_bundle = {
             "planning": {
@@ -576,4 +675,3 @@ class TripSearchExecutionMixin:
         if lng is None or lat is None:
             return ""
         return f"{lng},{lat}"
-
