@@ -6,6 +6,7 @@ import json
 import logging
 import time
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Dict
@@ -130,7 +131,13 @@ class DeleteSessionResponse(BaseModel):
     session_id: str
 
 
-app = FastAPI(title="TravelFlow 旅游出行助手 Web", openapi_tags=OPENAPI_TAGS)
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    setup_langsmith_tracing()
+    yield
+
+
+app = FastAPI(title="TravelFlow 旅游出行助手 Web", openapi_tags=OPENAPI_TAGS, lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -159,11 +166,6 @@ def _chunk_text(text: str, chunk_size: int = 2):
             buffer = ""
     if buffer:
         yield buffer
-
-
-@app.on_event("startup")
-async def _startup():
-    setup_langsmith_tracing()
 
 
 def _hydrate_short_term_memory(state: SessionState):
