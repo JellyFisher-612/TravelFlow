@@ -192,53 +192,21 @@ class EventCollectionAgent:
         if not query:
             return None
 
-        origin = None
-        destination = None
-        movement_match = re.search(r"从(?P<origin>[\u4e00-\u9fa5A-Za-z0-9·（）()]+?)(?:出发)?(?:去|到|前往)(?P<dest>[\u4e00-\u9fa5A-Za-z0-9·（）()]+)", query)
-        if movement_match:
-            origin = self._clean_place(movement_match.group("origin"))
-            destination = self._clean_place(movement_match.group("dest"))
+        places = self._extract_destination(query)
+        dates = self._extract_dates(query)
+        budget = self._extract_budget(query)
 
-        if not origin or not destination:
-            compact_match = re.search(r"(?P<origin>[\u4e00-\u9fa5]{2,8})(?:出发)?(?:去|到|前往)(?P<dest>[\u4e00-\u9fa5]{2,8})", query)
-            if compact_match:
-                origin = origin or self._clean_place(compact_match.group("origin"))
-                destination = destination or self._clean_place(compact_match.group("dest"))
-        if self._is_invalid_origin_candidate(origin):
-            origin = None
-
-        city_origin, city_destination = self._extract_places_by_city_names(query)
-        if city_origin and city_destination:
-            origin = city_origin
-            destination = city_destination
-        elif city_destination and not destination:
-            destination = city_destination
-
-        if not destination:
-            dest_match = re.search(r"(?:去|到|前往)(?P<dest>[\u4e00-\u9fa5]{2,8})", query)
-            if dest_match:
-                destination = self._clean_place(dest_match.group("dest"))
-
-        duration_days = self._extract_duration_days(query)
-        start_date = self._extract_start_date(query)
-        end_date = None
-        if start_date and duration_days:
-            from datetime import datetime, timedelta
-
-            start_dt = datetime.strptime(start_date, "%Y-%m-%d").date()
-            end_date = (start_dt + timedelta(days=duration_days - 1)).isoformat()
-
-        trip_purpose = None
-        if any(word in query for word in ("玩", "旅游", "旅行")):
-            trip_purpose = "旅游"
-        elif "出差" in query:
-            trip_purpose = "出差"
-
-        budget_level = self._extract_budget_level(query)
-        lodging_budget = self._extract_lodging_budget(query)
-        meal_budget_preference = self._extract_meal_budget_preference(query)
-        transport_budget_preference = self._extract_transport_budget_preference(query)
-        pace_preference = self._extract_pace_preference(query)
+        origin = places.get("origin")
+        destination = places.get("destination")
+        start_date = dates.get("start_date")
+        end_date = dates.get("end_date")
+        duration_days = self._extract_duration(query)
+        trip_purpose = self._extract_trip_purpose(query)
+        budget_level = budget.get("budget_level")
+        lodging_budget = budget.get("lodging_budget")
+        meal_budget_preference = budget.get("meal_budget_preference")
+        transport_budget_preference = budget.get("transport_budget_preference")
+        pace_preference = self._extract_pace(query)
 
         if not any(
             [
@@ -314,6 +282,73 @@ class EventCollectionAgent:
             "summary": "已提取：" + "，".join(summary_parts) if summary_parts else "已提取部分行程信息。",
             "suggested_options": self._build_suggested_options(missing_info),
         }
+
+    def _extract_destination(self, text: str) -> Dict[str, Optional[str]]:
+        """提取出发地和目的地。"""
+        origin = None
+        destination = None
+        movement_match = re.search(r"从(?P<origin>[\u4e00-\u9fa5A-Za-z0-9·（）()]+?)(?:出发)?(?:去|到|前往)(?P<dest>[\u4e00-\u9fa5A-Za-z0-9·（）()]+)", text)
+        if movement_match:
+            origin = self._clean_place(movement_match.group("origin"))
+            destination = self._clean_place(movement_match.group("dest"))
+
+        if not origin or not destination:
+            compact_match = re.search(r"(?P<origin>[\u4e00-\u9fa5]{2,8})(?:出发)?(?:去|到|前往)(?P<dest>[\u4e00-\u9fa5]{2,8})", text)
+            if compact_match:
+                origin = origin or self._clean_place(compact_match.group("origin"))
+                destination = destination or self._clean_place(compact_match.group("dest"))
+        if self._is_invalid_origin_candidate(origin):
+            origin = None
+
+        city_origin, city_destination = self._extract_places_by_city_names(text)
+        if city_origin and city_destination:
+            origin = city_origin
+            destination = city_destination
+        elif city_destination and not destination:
+            destination = city_destination
+
+        if not destination:
+            dest_match = re.search(r"(?:去|到|前往)(?P<dest>[\u4e00-\u9fa5]{2,8})", text)
+            if dest_match:
+                destination = self._clean_place(dest_match.group("dest"))
+
+        return {"origin": origin, "destination": destination}
+
+    def _extract_dates(self, text: str) -> Dict[str, Optional[str]]:
+        """提取出发和返程日期。"""
+        start_date = self._extract_start_date(text)
+        duration_days = self._extract_duration_days(text)
+        end_date = None
+        if start_date and duration_days:
+            from datetime import datetime, timedelta
+
+            start_dt = datetime.strptime(start_date, "%Y-%m-%d").date()
+            end_date = (start_dt + timedelta(days=duration_days - 1)).isoformat()
+        return {"start_date": start_date, "end_date": end_date}
+
+    def _extract_duration(self, text: str) -> Optional[int]:
+        """提取行程天数。"""
+        return self._extract_duration_days(text)
+
+    def _extract_budget(self, text: str) -> Dict[str, Any]:
+        """提取本次行程预算、住宿、餐饮和交通预算偏好。"""
+        return {
+            "budget_level": self._extract_budget_level(text),
+            "lodging_budget": self._extract_lodging_budget(text),
+            "meal_budget_preference": self._extract_meal_budget_preference(text),
+            "transport_budget_preference": self._extract_transport_budget_preference(text),
+        }
+
+    def _extract_pace(self, text: str) -> Optional[str]:
+        """提取行程节奏偏好。"""
+        return self._extract_pace_preference(text)
+
+    def _extract_trip_purpose(self, text: str) -> Optional[str]:
+        if any(word in text for word in ("玩", "旅游", "旅行")):
+            return "旅游"
+        if "出差" in text:
+            return "出差"
+        return None
 
     def _clean_place(self, value: str) -> str:
         place = (value or "").strip()
