@@ -802,7 +802,7 @@ class TravelFlowCLI:
                     try:
                         dt = datetime.fromisoformat(timestamp)
                         time_str = dt.strftime("%H:%M:%S")
-                    except:
+                    except Exception:
                         time_str = ""
                 else:
                     time_str = ""
