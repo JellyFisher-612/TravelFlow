@@ -234,10 +234,16 @@ async def _get_or_create_session(user_id: str, session_id: str | None) -> tuple[
 
 @app.get("/", response_class=HTMLResponse, tags=["ui"], summary="Render the browser chat UI")
 async def index() -> str:
-    html_path = TEMPLATE_DIR / "index.html"
-    if not html_path.exists():
-        raise HTTPException(status_code=500, detail="前端页面不存在")
-    return html_path.read_text(encoding="utf-8")
+    try:
+        html_path = TEMPLATE_DIR / "index.html"
+        if not html_path.exists():
+            raise HTTPException(status_code=500, detail="前端页面不存在")
+        return html_path.read_text(encoding="utf-8")
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Endpoint error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="内部服务器错误")
 
 
 @app.post(
@@ -247,27 +253,33 @@ async def index() -> str:
     summary="Run one chat turn and return a complete JSON response",
 )
 async def chat(req: ChatRequest) -> ChatResponse:
-    text = req.message.strip()
-    if not text:
-        raise HTTPException(status_code=400, detail="message 不能为空")
+    try:
+        text = req.message.strip()
+        if not text:
+            raise HTTPException(status_code=400, detail="message 不能为空")
 
-    session_id, state = await _get_or_create_session(req.user_id, req.session_id)
+        session_id, state = await _get_or_create_session(req.user_id, req.session_id)
 
-    async with state.lock:
-        started = time.time()
-        reply, _, _, trace = await state.cli.process_query_for_web(text)
+        async with state.lock:
+            started = time.time()
+            reply, _, _, trace = await state.cli.process_query_for_web(text)
 
-        latency_ms = int((time.time() - started) * 1000)
-        state.last_active = datetime.now().isoformat()
-        _update_session_meta(state.cli.memory_manager.long_term, session_id, req.user_id, preview=text)
+            latency_ms = int((time.time() - started) * 1000)
+            state.last_active = datetime.now().isoformat()
+            _update_session_meta(state.cli.memory_manager.long_term, session_id, req.user_id, preview=text)
 
-    return ChatResponse(
-        session_id=session_id,
-        user_id=req.user_id,
-        reply=reply,
-        latency_ms=latency_ms,
-        trace=trace,
-    )
+        return ChatResponse(
+            session_id=session_id,
+            user_id=req.user_id,
+            reply=reply,
+            latency_ms=latency_ms,
+            trace=trace,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Endpoint error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="内部服务器错误")
 
 
 @app.post(
@@ -369,41 +381,47 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
     summary="List persisted chat-log sessions for a user",
 )
 async def list_sessions(user_id: str = "default_user") -> list[SessionListItem]:
-    memory = LongTermMemory(user_id=user_id, storage_path="data/memory")
-    chat_history = memory.get_chat_history(limit=None)
-    session_meta = memory.get_session_meta_map()
+    try:
+        memory = LongTermMemory(user_id=user_id, storage_path="data/memory")
+        chat_history = memory.get_chat_history(limit=None)
+        session_meta = memory.get_session_meta_map()
 
-    grouped: Dict[str, list] = {}
-    for msg in chat_history:
-        sid = msg.get("session_id")
-        if not sid:
-            continue
-        grouped.setdefault(sid, []).append(msg)
+        grouped: Dict[str, list] = {}
+        for msg in chat_history:
+            sid = msg.get("session_id")
+            if not sid:
+                continue
+            grouped.setdefault(sid, []).append(msg)
 
-    items: list[SessionListItem] = []
-    for sid, messages in grouped.items():
-        meta = session_meta.get(sid, {}) if isinstance(session_meta, dict) else {}
-        preview = meta.get("preview", "")
-        if not preview:
-            for m in messages:
-                if m.get("role") == "user" and m.get("content"):
-                    preview = str(m.get("content"))[:80]
-                    break
-        created_at = meta.get("created_at") or (messages[0].get("timestamp") if messages else datetime.now().isoformat())
-        last_active = meta.get("last_active") or (messages[-1].get("timestamp") if messages else created_at)
-        items.append(
-            SessionListItem(
-                session_id=sid,
-                user_id=user_id,
-                created_at=created_at,
-                last_active=last_active,
-                message_count=len(messages),
-                preview=preview or "新会话",
+        items: list[SessionListItem] = []
+        for sid, messages in grouped.items():
+            meta = session_meta.get(sid, {}) if isinstance(session_meta, dict) else {}
+            preview = meta.get("preview", "")
+            if not preview:
+                for m in messages:
+                    if m.get("role") == "user" and m.get("content"):
+                        preview = str(m.get("content"))[:80]
+                        break
+            created_at = meta.get("created_at") or (messages[0].get("timestamp") if messages else datetime.now().isoformat())
+            last_active = meta.get("last_active") or (messages[-1].get("timestamp") if messages else created_at)
+            items.append(
+                SessionListItem(
+                    session_id=sid,
+                    user_id=user_id,
+                    created_at=created_at,
+                    last_active=last_active,
+                    message_count=len(messages),
+                    preview=preview or "新会话",
+                )
             )
-        )
 
-    items.sort(key=lambda item: item.last_active, reverse=True)
-    return items
+        items.sort(key=lambda item: item.last_active, reverse=True)
+        return items
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Endpoint error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="内部服务器错误")
 
 
 @app.get(
@@ -413,33 +431,39 @@ async def list_sessions(user_id: str = "default_user") -> list[SessionListItem]:
     summary="Get rendered messages for one chat-log session",
 )
 async def get_session_detail(session_id: str, user_id: str = "default_user") -> SessionDetail:
-    memory = LongTermMemory(user_id=user_id, storage_path="data/memory")
-    messages = memory.get_chat_history(limit=None, session_id=session_id)
-    session_meta = memory.get_session_meta_map()
-    meta = session_meta.get(session_id, {}) if isinstance(session_meta, dict) else {}
+    try:
+        memory = LongTermMemory(user_id=user_id, storage_path="data/memory")
+        messages = memory.get_chat_history(limit=None, session_id=session_id)
+        session_meta = memory.get_session_meta_map()
+        meta = session_meta.get(session_id, {}) if isinstance(session_meta, dict) else {}
 
-    if not messages:
-        raise HTTPException(status_code=404, detail="会话不存在")
+        if not messages:
+            raise HTTPException(status_code=404, detail="会话不存在")
 
-    rendered = [
-        SessionMessage(
-            role=str(msg.get("role", "assistant")),
-            content=_render_history_content(msg),
-            timestamp=msg.get("timestamp"),
+        rendered = [
+            SessionMessage(
+                role=str(msg.get("role", "assistant")),
+                content=_render_history_content(msg),
+                timestamp=msg.get("timestamp"),
+            )
+            for msg in messages
+        ]
+
+        created_at = meta.get("created_at") or messages[0].get("timestamp") or datetime.now().isoformat()
+        last_active = meta.get("last_active") or messages[-1].get("timestamp") or created_at
+
+        return SessionDetail(
+            session_id=session_id,
+            user_id=user_id,
+            created_at=created_at,
+            last_active=last_active,
+            messages=rendered,
         )
-        for msg in messages
-    ]
-
-    created_at = meta.get("created_at") or messages[0].get("timestamp") or datetime.now().isoformat()
-    last_active = meta.get("last_active") or messages[-1].get("timestamp") or created_at
-
-    return SessionDetail(
-        session_id=session_id,
-        user_id=user_id,
-        created_at=created_at,
-        last_active=last_active,
-        messages=rendered,
-    )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Endpoint error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="内部服务器错误")
 
 
 @app.delete(
@@ -449,15 +473,21 @@ async def get_session_detail(session_id: str, user_id: str = "default_user") -> 
     summary="Delete one persisted chat-log session",
 )
 async def delete_session(session_id: str, user_id: str = "default_user") -> DeleteSessionResponse:
-    memory = LongTermMemory(user_id=user_id, storage_path="data/memory")
-    deleted_count = memory.delete_session(session_id)
-    if deleted_count <= 0:
-        raise HTTPException(status_code=404, detail="会话不存在")
+    try:
+        memory = LongTermMemory(user_id=user_id, storage_path="data/memory")
+        deleted_count = memory.delete_session(session_id)
+        if deleted_count <= 0:
+            raise HTTPException(status_code=404, detail="会话不存在")
 
-    if session_id in _sessions:
-        _sessions.pop(session_id, None)
+        if session_id in _sessions:
+            _sessions.pop(session_id, None)
 
-    return DeleteSessionResponse(ok=True, session_id=session_id)
+        return DeleteSessionResponse(ok=True, session_id=session_id)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Endpoint error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="内部服务器错误")
 
 
 def main() -> None:
