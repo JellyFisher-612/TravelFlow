@@ -142,7 +142,7 @@ class EventCollectionAgent:
                     ]
                     if result_data.get(k) in (None, "")
                 ]
-            if not result_data.get("extracted_count"):
+            if result_data.get("extracted_count") is None:
                 result_data["extracted_count"] = 7 - len(result_data.get("missing_info", []))
         except Exception as e:
             logger.error("Event collection failed: %s", e)
@@ -203,7 +203,7 @@ class EventCollectionAgent:
         destination = places.get("destination")
         start_date = dates.get("start_date")
         end_date = dates.get("end_date")
-        duration_days = self._extract_duration(query)
+        duration_days = dates.get("duration_days") or self._extract_duration(query)
         trip_purpose = self._extract_trip_purpose(query)
         budget_level = budget.get("budget_level")
         lodging_budget = budget.get("lodging_budget")
@@ -311,9 +311,17 @@ class EventCollectionAgent:
             destination = city_destination
 
         if not destination:
-            dest_match = re.search(r"(?:去|到|前往)(?P<dest>[\u4e00-\u9fa5]{2,8})", text)
+            dest_match = re.search(r"(?:去|到|前往|飞)(?P<dest>[\u4e00-\u9fa5]{2,8})", text)
             if dest_match:
                 destination = self._clean_place(dest_match.group("dest"))
+
+        if not origin:
+            origin_match = re.search(
+                r"(?:从(?P<from>[\u4e00-\u9fa5]{2,8}?)(?:出发)?(?:$|，|,|。|去|到|前往)|我(?:现在)?人在(?P<at>[\u4e00-\u9fa5]{2,8}))",
+                text,
+            )
+            if origin_match:
+                origin = self._clean_place(origin_match.group("from") or origin_match.group("at"))
 
         return {"origin": origin, "destination": destination}
 
@@ -321,13 +329,20 @@ class EventCollectionAgent:
         """提取出发和返程日期。"""
         start_date = self._extract_start_date(text)
         duration_days = self._extract_duration_days(text)
-        end_date = None
-        if start_date and duration_days:
+        end_date = self._extract_end_date(text, start_date)
+        if start_date and duration_days and not end_date:
             from datetime import datetime, timedelta
 
             start_dt = datetime.strptime(start_date, "%Y-%m-%d").date()
             end_date = (start_dt + timedelta(days=duration_days - 1)).isoformat()
-        return {"start_date": start_date, "end_date": end_date}
+        if start_date and end_date:
+            from datetime import datetime
+
+            start_dt = datetime.strptime(start_date, "%Y-%m-%d").date()
+            end_dt = datetime.strptime(end_date, "%Y-%m-%d").date()
+            if end_dt >= start_dt:
+                duration_days = (end_dt - start_dt).days + 1
+        return {"start_date": start_date, "end_date": end_date, "duration_days": duration_days}
 
     def _extract_duration(self, text: str) -> Optional[int]:
         """提取行程天数。"""
@@ -347,10 +362,12 @@ class EventCollectionAgent:
         return self._extract_pace_preference(text)
 
     def _extract_trip_purpose(self, text: str) -> Optional[str]:
-        if any(word in text for word in ("玩", "旅游", "旅行")):
+        if any(word in text for word in ("玩", "旅游", "旅行", "度假", "游玩")):
             return "旅游"
         if "出差" in text:
             return "出差"
+        if any(word in text for word in ("商务", "开会", "会议")):
+            return "商务"
         return None
 
     def _clean_place(self, value: str) -> str:
@@ -393,9 +410,9 @@ class EventCollectionAgent:
         return None
 
     def _extract_pace_preference(self, query: str) -> Optional[str]:
-        if any(word in query for word in ("轻松", "不要太赶", "慢一点")):
+        if any(word in query for word in ("轻松", "休闲", "不要太赶", "慢一点")):
             return "轻松"
-        if any(word in query for word in ("紧凑", "多看", "多安排")):
+        if any(word in query for word in ("紧凑", "多看", "多安排", "多去几个地方", "赶一点")):
             return "紧凑"
         if "均衡" in query:
             return "均衡"
@@ -487,6 +504,10 @@ class EventCollectionAgent:
         for text, value in cn_nums.items():
             if f"{text}天" in query:
                 return value
+            if f"{text}周" in query or f"{text}个礼拜" in query or f"{text}礼拜" in query:
+                return value * 7
+        if "一周" in query or "一个礼拜" in query:
+            return 7
         return None
 
     def _extract_start_date(self, query: str) -> Optional[str]:
@@ -533,6 +554,40 @@ class EventCollectionAgent:
                 return datetime(year, month, day).date().isoformat()
             except ValueError:
                 return None
+        return None
+
+    def _extract_end_date(self, query: str, start_date: Optional[str]) -> Optional[str]:
+        from datetime import datetime, timedelta
+
+        if not start_date:
+            return None
+
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d").date()
+
+        full_date_range = re.search(r"(?:到|至|-|~|－|—)\s*(?:(20\d{2})年)?(\d{1,2})月(\d{1,2})日?", query)
+        if full_date_range:
+            try:
+                year = int(full_date_range.group(1) or start_dt.year)
+                month = int(full_date_range.group(2))
+                day = int(full_date_range.group(3))
+                return datetime(year, month, day).date().isoformat()
+            except ValueError:
+                return None
+
+        same_month_range = re.search(r"\d{1,2}月\d{1,2}日?\s*(?:到|至|-|~|－|—)\s*(\d{1,2})日?", query)
+        if same_month_range:
+            try:
+                return datetime(start_dt.year, start_dt.month, int(same_month_range.group(1))).date().isoformat()
+            except ValueError:
+                return None
+
+        weekday_map = {"一": 0, "二": 1, "三": 2, "四": 3, "五": 4, "六": 5, "日": 6, "天": 6}
+        week_range = re.search(r"下周[一二三四五六日天](?:到|至|-|~|－|—)?周?([一二三四五六日天])", query)
+        if week_range:
+            target_wd = weekday_map[week_range.group(1)]
+            days_after_start = (target_wd - start_dt.weekday()) % 7
+            return (start_dt + timedelta(days=days_after_start)).isoformat()
+
         return None
 
     async def _invoke_structured(self, prompt: str) -> EventCollectionOutput:

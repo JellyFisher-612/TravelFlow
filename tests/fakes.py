@@ -5,6 +5,9 @@ These fakes keep automated tests away from real LLMs and external services.
 
 from __future__ import annotations
 
+import json
+from typing import Any
+
 
 class ExplodingLLM:
     """LLM double that fails the test if intent routing calls it."""
@@ -31,6 +34,42 @@ class FailingTextLLM:
     async def ainvoke(self, messages):
         self.calls.append(("ainvoke", messages))
         raise self.error
+
+
+class RecordingLLM:
+    """LLM double that records calls and returns deterministic structured/text output."""
+
+    def __init__(self, response: Any | None = None, text_response: str | None = None) -> None:
+        self.response = response if response is not None else {}
+        self.text_response = text_response
+        self.calls = []
+
+    def with_structured_output(self, schema):
+        self.calls.append(("with_structured_output", schema))
+        return _RecordingStructuredLLM(self)
+
+    async def ainvoke(self, messages):
+        self.calls.append(("ainvoke", messages))
+        if self.text_response is not None:
+            content = self.text_response
+        else:
+            response = self._resolve_response(messages)
+            content = json.dumps(response, ensure_ascii=False)
+        return type("FakeResponse", (), {"content": content})()
+
+    def _resolve_response(self, prompt):
+        if callable(self.response):
+            return self.response(prompt)
+        return self.response
+
+
+class _RecordingStructuredLLM:
+    def __init__(self, parent: RecordingLLM) -> None:
+        self.parent = parent
+
+    async def ainvoke(self, prompt):
+        self.parent.calls.append(("structured_ainvoke", prompt))
+        return self.parent._resolve_response(prompt)
 
 
 class FakeAgent:
