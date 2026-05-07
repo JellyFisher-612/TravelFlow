@@ -13,6 +13,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+from starlette.middleware.cors import CORSMiddleware
 
 from cli import TravelFlowCLI
 from config import SYSTEM_CONFIG
@@ -112,6 +113,13 @@ class DeleteSessionResponse(BaseModel):
 
 
 app = FastAPI(title="TravelFlow 旅游出行助手 Web", openapi_tags=OPENAPI_TAGS)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 _sessions: Dict[str, SessionState] = {}
 
 
