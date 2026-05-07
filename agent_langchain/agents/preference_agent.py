@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional, Union
 
 from utils.langchain_runtime import ainvoke_text
 from utils.llm_json import parse_json_text
-from utils.budget_utils import detect_budget_level
+from utils.budget_utils import detect_budget_level, detect_lodging_budget
 from utils.structured_output_guard import (
     is_structured_output_unavailable_error,
     mark_structured_output_unsupported,
@@ -120,10 +120,36 @@ class PreferenceAgent:
             return None
 
         preferences: List[Dict[str, Any]] = []
+        action = self._detect_update_action(query)
+
+        home_location = self._extract_home_location(query)
+        if home_location:
+            preferences.append({"type": "home_location", "value": home_location, "action": "replace"})
+
+        hotel_brands = self._extract_hotel_brands(query)
+        for brand in hotel_brands:
+            preferences.append({"type": "hotel_brands", "value": brand, "action": action})
+
+        airlines = self._extract_airlines(query)
+        for airline in airlines:
+            preferences.append({"type": "airlines", "value": airline, "action": action})
+
+        seat_preference = self._extract_seat_preference(query)
+        if seat_preference:
+            preferences.append({"type": "seat_preference", "value": seat_preference, "action": "replace"})
+
+        lodging_budget = self._extract_lodging_budget(query)
+        if lodging_budget:
+            preferences.append({"type": "lodging_budget_per_night", "value": lodging_budget, "action": "replace"})
+
         if "预算偏好" in query or "预算" in query:
             budget_level = detect_budget_level(query)
             if budget_level:
                 preferences.append({"type": "budget_level", "value": budget_level, "action": "replace"})
+
+        implicit_budget = self._extract_implicit_budget_level(query)
+        if implicit_budget and not any(item["type"] == "budget_level" for item in preferences):
+            preferences.append({"type": "budget_level", "value": implicit_budget, "action": "replace"})
 
         if "节奏" in query or "不要太赶" in query or "多看" in query:
             if "轻松" in query or "不要太赶" in query:
@@ -154,10 +180,103 @@ class PreferenceAgent:
             "长期",
             "平时",
             "通常",
+            "一般",
             "每次",
             "下次",
+            "我还",
+            "我也",
+            "我常",
+            "常坐",
+            "搬家",
+            "改成",
+            "换成",
+            "靠窗",
+            "过道",
         )
         return any(marker in query for marker in explicit_markers)
+
+    def _detect_update_action(self, query: str) -> str:
+        if any(word in query for word in ("还", "也", "另外", "同时")):
+            return "append"
+        if any(word in query for word in ("改成", "换成", "搬家")):
+            return "replace"
+        return "replace"
+
+    def _extract_home_location(self, query: str) -> Optional[str]:
+        import re
+
+        match = re.search(r"(?:搬家到|住到|定居到|常住在?)([\u4e00-\u9fa5]{2,8})", query)
+        if match:
+            return re.sub(r"[了啊呀呢吧吗嘛]$", "", match.group(1))
+        return None
+
+    def _extract_hotel_brands(self, query: str) -> List[str]:
+        known_brands = [
+            "汉庭",
+            "如家",
+            "全季",
+            "亚朵",
+            "锦江之星",
+            "7天",
+            "速8",
+            "希尔顿",
+            "万豪",
+            "洲际",
+            "桔子",
+            "维也纳",
+        ]
+        return [brand for brand in known_brands if brand in query]
+
+    def _extract_airlines(self, query: str) -> List[str]:
+        aliases = {
+            "东航": "东航",
+            "东方航空": "东航",
+            "南航": "南航",
+            "南方航空": "南航",
+            "国航": "国航",
+            "中国国航": "国航",
+            "海航": "海航",
+            "海南航空": "海航",
+            "厦航": "厦航",
+            "春秋": "春秋航空",
+            "吉祥": "吉祥航空",
+        }
+        airlines: List[str] = []
+        for alias, normalized in aliases.items():
+            if alias in query and normalized not in airlines:
+                airlines.append(normalized)
+        return airlines
+
+    def _extract_seat_preference(self, query: str) -> Optional[str]:
+        if "靠窗" in query or "窗口" in query:
+            return "window"
+        if "过道" in query or "靠走廊" in query:
+            return "aisle"
+        return None
+
+    def _extract_lodging_budget(self, query: str) -> Optional[Dict[str, int]]:
+        import re
+
+        min_value, max_value = detect_lodging_budget(query)
+        if min_value is None and max_value is None:
+            range_match = re.search(r"住\s*(\d+)\s*(?:到|至|-|~|－|—)\s*(\d+)\s*(?:元)?(?:的)?酒店", query)
+            if range_match:
+                low = int(range_match.group(1))
+                high = int(range_match.group(2))
+                min_value, max_value = min(low, high), max(low, high)
+        if min_value is None and max_value is None:
+            return None
+        value: Dict[str, int] = {}
+        if min_value is not None:
+            value["min"] = min_value
+        if max_value is not None:
+            value["max"] = max_value
+        return value
+
+    def _extract_implicit_budget_level(self, query: str) -> Optional[str]:
+        if any(word in query for word in ("住好一点", "好一点的酒店", "酒店好一点")):
+            return "品质型"
+        return None
 
     async def _invoke_structured(self, prompt: str) -> PreferenceOutput:
         lc_model = self.model
