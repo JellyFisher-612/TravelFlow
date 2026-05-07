@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 class ShortTermMemory:
     """短期记忆：最近对话上下文缓存。"""
 
-    def __init__(self, user_id: str, session_id: str, max_turns: int = 10):
+    def __init__(self, user_id: str, session_id: str, max_turns: int = 10) -> None:
         self.user_id = user_id
         self.session_id = session_id
         self.max_turns = max_turns
@@ -60,7 +60,7 @@ class ShortTermMemory:
             "metadata": metadata or {},
         }
 
-    def add_message(self, role: str, content: str, metadata: Dict = None):
+    def add_message(self, role: str, content: str, metadata: Dict = None) -> None:
         message = self._build_message(role, content, metadata)
 
         if self._redis:
@@ -111,7 +111,7 @@ class ShortTermMemory:
             lines.append(f"{role_name}: {msg.get('content', '')}")
         return "\n".join(lines)
 
-    def clear(self):
+    def clear(self) -> None:
         if self._redis:
             try:
                 self._redis.delete(self._key)
@@ -123,7 +123,7 @@ class ShortTermMemory:
         self._pending_plan = None
         self._working_state = {}
 
-    def set_working_state(self, state: Dict[str, Any]):
+    def set_working_state(self, state: Dict[str, Any]) -> None:
         payload = {
             "state": state or {},
             "timestamp": datetime.now().isoformat(),
@@ -146,13 +146,13 @@ class ShortTermMemory:
                 logger.warning("Redis working state read failed: %s", e)
         return dict(self._working_state)
 
-    def update_working_state(self, patch: Dict[str, Any]):
+    def update_working_state(self, patch: Dict[str, Any]) -> None:
         current_payload = self.get_working_state()
         current_state = current_payload.get("state") if isinstance(current_payload.get("state"), dict) else {}
         current_state.update(patch or {})
         self.set_working_state(current_state)
 
-    def clear_working_state(self):
+    def clear_working_state(self) -> None:
         if self._redis:
             try:
                 self._redis.delete(self._working_state_key)
@@ -160,7 +160,7 @@ class ShortTermMemory:
                 logger.warning("Redis working state delete failed: %s", e)
         self._working_state = {}
 
-    def set_pending_plan(self, query: str, metadata: Optional[Dict[str, Any]] = None):
+    def set_pending_plan(self, query: str, metadata: Optional[Dict[str, Any]] = None) -> None:
         payload = {
             "query": query,
             "metadata": metadata or {},
@@ -185,7 +185,7 @@ class ShortTermMemory:
                 logger.warning("Redis pending plan read failed: %s", e)
         return self._pending_plan
 
-    def clear_pending_plan(self):
+    def clear_pending_plan(self) -> None:
         if self._redis:
             try:
                 self._redis.delete(self._pending_plan_key)

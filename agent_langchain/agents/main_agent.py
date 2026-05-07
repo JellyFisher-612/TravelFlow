@@ -48,7 +48,7 @@ class MainAgent:
         self.intention_agent = self.intent_recognition
         self.orchestrator = self.agent_scheduler
 
-    def set_event_callback(self, callback):
+    def set_event_callback(self, callback: Optional[Callable[[Any], None]]) -> None:
         self.event_callback = callback
         if self.agent_scheduler and hasattr(self.agent_scheduler, "set_event_callback"):
             self.agent_scheduler.set_event_callback(callback)

@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 class LongTermMemory:
-    def __init__(self, user_id: str, storage_path: str = "data/memory"):
+    def __init__(self, user_id: str, storage_path: str = "data/memory") -> None:
         self.user_id = user_id
         self.storage_path = storage_path
         self.db_path = os.path.join(storage_path, f"{user_id}.json")
@@ -305,7 +305,7 @@ class LongTermMemory:
         value: Any,
         metadata: Dict[str, Any] = None,
         action: str = "replace",
-    ):
+    ) -> None:
         metadata = metadata or {}
         existing_record = self.get_preference_record(pref_type)
         record = self._build_preference_record(
@@ -494,7 +494,7 @@ class LongTermMemory:
             return str(raw.get("status", "active"))
         return "active"
 
-    def add_hotel_brand(self, brand: str):
+    def add_hotel_brand(self, brand: str) -> None:
         current = self.get_preference("hotel_brands")
         if isinstance(current, list):
             values = current
@@ -506,7 +506,7 @@ class LongTermMemory:
             values.append(brand)
         self.save_preference("hotel_brands", values)
 
-    def add_airline(self, airline: str):
+    def add_airline(self, airline: str) -> None:
         current = self.get_preference("airlines")
         if isinstance(current, list):
             values = current
@@ -520,7 +520,13 @@ class LongTermMemory:
 
     # ------------------------- chat history -------------------------
 
-    def add_chat_message(self, role: str, content: str, session_id: str = None, metadata: Dict[str, Any] = None):
+    def add_chat_message(
+        self,
+        role: str,
+        content: str,
+        session_id: str = None,
+        metadata: Dict[str, Any] = None,
+    ) -> None:
         metadata = metadata or {}
         now = datetime.now().isoformat()
         if self._pg:
@@ -588,7 +594,7 @@ class LongTermMemory:
 
     # ------------------------- trip history -------------------------
 
-    def save_trip_history(self, trip_info: Dict[str, Any]):
+    def save_trip_history(self, trip_info: Dict[str, Any]) -> None:
         trip_id = f"trip_{int(datetime.now().timestamp() * 1000)}"
         payload = {"trip_id": trip_id, "timestamp": datetime.now().isoformat(), **trip_info}
 
@@ -644,7 +650,7 @@ class LongTermMemory:
 
     # ------------------------- behavior feedback -------------------------
 
-    def save_behavior_feedback(self, feedback: Any, metadata: Dict[str, Any] = None):
+    def save_behavior_feedback(self, feedback: Any, metadata: Dict[str, Any] = None) -> None:
         payload = {
             "feedback": feedback,
             "metadata": metadata or {},
@@ -677,7 +683,7 @@ class LongTermMemory:
 
     # ------------------------- session meta -------------------------
 
-    def ensure_session_meta(self, session_id: str):
+    def ensure_session_meta(self, session_id: str) -> None:
         if self._pg:
             with self._pg.cursor() as cur:
                 cur.execute(
@@ -706,7 +712,7 @@ class LongTermMemory:
             }
             self._save_json()
 
-    def update_session_meta(self, session_id: str, preview: str = ""):
+    def update_session_meta(self, session_id: str, preview: str = "") -> None:
         if self._pg:
             with self._pg.cursor() as cur:
                 cur.execute(
@@ -761,7 +767,7 @@ class LongTermMemory:
 
         return self._json_data.get("session_meta", {})
 
-    def update_session_summary(self, session_id: str, summary: str, message_count: int):
+    def update_session_summary(self, session_id: str, summary: str, message_count: int) -> None:
         """Persist an LLM summary for a chat-log session without promoting it to memory."""
         summary = (summary or "").strip()
         message_count = int(message_count or 0)
@@ -847,7 +853,7 @@ class LongTermMemory:
 
     # ------------------------- stats / maintenance -------------------------
 
-    def increment_query_count(self):
+    def increment_query_count(self) -> None:
         # 保留兼容接口；当前未做专门表存储，可按需扩展
         return None
 
@@ -870,7 +876,7 @@ class LongTermMemory:
         stats["total_preferences"] = len(self.get_preference_records(include_inactive=True))
         return stats
 
-    def clear_history(self):
+    def clear_history(self) -> None:
         if self._pg:
             with self._pg.cursor() as cur:
                 cur.execute("DELETE FROM chat_history WHERE user_id=%s", (self.user_id,))
@@ -891,7 +897,7 @@ class LongTermMemory:
         }
         self._save_json()
 
-    def delete_all(self):
+    def delete_all(self) -> None:
         if self._pg:
             with self._pg.cursor() as cur:
                 cur.execute("DELETE FROM user_preferences WHERE user_id=%s", (self.user_id,))

@@ -10,7 +10,7 @@ import importlib.util
 import inspect
 import logging
 from pathlib import Path
-from typing import Dict, Any, Optional, Callable
+from typing import Any, Callable, Dict, ItemsView, Optional, ValuesView
 from rich.console import Console
 
 logger = logging.getLogger(__name__)
@@ -23,7 +23,13 @@ class LazyAgentRegistry:
     SKILL.md 能力说明，并为旧入口保留兼容回退。
     """
 
-    def __init__(self, model, cache: Dict, memory_manager=None, event_callback: Optional[Callable[[str], None]] = None):
+    def __init__(
+        self,
+        model: Any,
+        cache: Dict[str, Any],
+        memory_manager: Any = None,
+        event_callback: Optional[Callable[[str], None]] = None,
+    ) -> None:
         """
         初始化懒加载注册器
 
@@ -194,13 +200,13 @@ class LazyAgentRegistry:
     def __contains__(self, agent_name: str) -> bool:
         return self._resolve_agent_name(agent_name) is not None or agent_name in self.cache
 
-    def get(self, agent_name: str, default=None):
+    def get(self, agent_name: str, default: Any = None) -> Any:
         try:
             return self[agent_name]
         except KeyError:
             return default
 
-    def keys(self):
+    def keys(self) -> list[str]:
         # 返回所有可能的 key（包括 legacy mapping 的 key，为了兼容 orchestrator）
         keys = set(self._skill_map.keys()) | set(self._formal_agent_classes.keys())
         for legacy_key, skill_val in self._legacy_mapping.items():
@@ -208,10 +214,10 @@ class LazyAgentRegistry:
                 keys.add(legacy_key)
         return list(keys)
 
-    def values(self):
+    def values(self) -> ValuesView[Any]:
         return self.cache.values()
 
-    def items(self):
+    def items(self) -> ItemsView[str, Any]:
         return self.cache.items()
         
     def get_loaded_agents(self) -> list:

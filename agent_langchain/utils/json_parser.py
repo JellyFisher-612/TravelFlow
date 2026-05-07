@@ -5,11 +5,12 @@ JSON 解析辅助工具
 import json
 import re
 import logging
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
 
-def robust_json_parse(text: str, fallback=None) -> dict:
+def robust_json_parse(text: str | dict, fallback: Any = None) -> dict:
     """
     鲁棒的 JSON 解析函数
 
@@ -173,4 +174,3 @@ def _log_direct_parse_context(json_str: str, error: json.JSONDecodeError) -> Non
     start = max(0, error_pos - 50)
     end = min(len(json_str), error_pos + 50)
     logger.warning(f"Error context: ...{json_str[start:end]}...")
-

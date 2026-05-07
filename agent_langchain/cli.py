@@ -8,7 +8,7 @@ import asyncio
 import sys
 import os
 import io
-from typing import Optional
+from typing import Any, Callable, Optional
 
 # 添加项目根目录到路径
 project_root = os.path.dirname(os.path.abspath(__file__))
@@ -40,7 +40,7 @@ from agents.main_agent import MainAgent
 class TravelFlowCLI:
     """TravelFlow 旅游出行助手 CLI"""
 
-    def __init__(self):
+    def __init__(self) -> None:
         """初始化 CLI"""
         self.console = Console()
         self.user_id = None
@@ -58,7 +58,7 @@ class TravelFlowCLI:
         self._web_trace_events = []
         self._runtime_event_callback = None
 
-    def set_runtime_event_callback(self, callback):
+    def set_runtime_event_callback(self, callback: Optional[Callable[[Any], None]]) -> None:
         """设置运行时事件回调，用于 Web 流式展示。"""
         self._runtime_event_callback = callback
         if self.main_agent and hasattr(self.main_agent, "set_event_callback"):
@@ -80,11 +80,11 @@ class TravelFlowCLI:
             self._web_trace_events.append(message)
             self._emit_runtime_event(message)
 
-    def print_banner(self):
+    def print_banner(self) -> None:
         """打印欢迎横幅"""
         self.console.print("\n[bold cyan]🌏 TravelFlow 旅游出行助手[/bold cyan] - 让旅行规划更简单\n", style="bold")
 
-    def print_help(self):
+    def print_help(self) -> None:
         """打印帮助信息"""
         table = Table(title="命令列表", show_header=True, header_style="bold magenta")
         table.add_column("命令", style="cyan", width=20)
@@ -110,7 +110,7 @@ class TravelFlowCLI:
         user_id: Optional[str] = None,
         interactive: bool = True,
         session_id: Optional[str] = None,
-    ):
+    ) -> None:
         """初始化系统 - 使用懒加载优化启动速度"""
         # 初始化 LangSmith tracing（若未开启或未配置 key，则自动跳过）
         setup_langsmith_tracing()
@@ -259,7 +259,7 @@ class TravelFlowCLI:
             return fallback, None, fallback, trace
         return self.render_result_text(result_data), result_data, None, trace
 
-    async def process_query(self, user_input: str):
+    async def process_query(self, user_input: str) -> None:
         """
         处理用户查询（原逻辑保留；仅在入口加熔断检查、对 LLM 调用加重试）
         """
@@ -798,7 +798,7 @@ class TravelFlowCLI:
         parts = [examples[item] for item in missing_info if item in examples]
         return "，".join(parts)
 
-    def show_status(self):
+    def show_status(self) -> None:
         """显示当前状态"""
         # 记忆统计
         full_context = self.memory_manager.get_full_context()
@@ -858,7 +858,7 @@ class TravelFlowCLI:
             self.console.print(dialogue_table)
             self.console.print()
 
-    async def run_health_check(self):
+    async def run_health_check(self) -> None:
         """在会话内执行健康检查并显示熔断器状态"""
         if self.circuit_breaker:
             status = self.circuit_breaker.get_status()
@@ -875,7 +875,7 @@ class TravelFlowCLI:
             self.console.print(f"LLM 服务: [red]不可用[/red] - {msg}", style="bold")
         self.console.print()
 
-    def show_history(self):
+    def show_history(self) -> None:
         """显示历史行程"""
         history = self.memory_manager.long_term.get_trip_history(10)
 
@@ -901,7 +901,7 @@ class TravelFlowCLI:
 
         self.console.print(table)
 
-    def show_preferences(self):
+    def show_preferences(self) -> None:
         """显示用户偏好"""
         prefs = self.memory_manager.long_term.get_preference()
 
@@ -915,7 +915,7 @@ class TravelFlowCLI:
 
         self.console.print(table)
 
-    async def run(self):
+    async def run(self) -> None:
         """运行 CLI"""
         # 打印横幅
         self.print_banner()
@@ -989,7 +989,7 @@ def run_health_check_standalone() -> int:
     return 1
 
 
-def main():
+def main() -> None:
     """主函数"""
     if len(sys.argv) > 1 and sys.argv[1].strip().lower() == "health":
         exit(run_health_check_standalone())

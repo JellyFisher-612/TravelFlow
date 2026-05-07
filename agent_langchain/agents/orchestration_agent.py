@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import logging
-from typing import Any, Dict, List, Optional, TypedDict
+from typing import Any, Callable, Dict, List, Optional, TypedDict
 
 logger = logging.getLogger(__name__)
 
@@ -37,9 +37,9 @@ class AgentScheduler:
         name: str = "AgentScheduler",
         agent_registry: Optional[Dict[str, Any]] = None,
         memory_manager=None,
-        event_callback=None,
+        event_callback: Optional[Callable[[Any], None]] = None,
         **kwargs,
-    ):
+    ) -> None:
         super().__init__()
         self.name = name
         self.agent_registry = agent_registry or {}
@@ -54,7 +54,7 @@ class AgentScheduler:
         }
         self._graph = self._build_graph()
 
-    def set_event_callback(self, callback):
+    def set_event_callback(self, callback: Optional[Callable[[Any], None]]) -> None:
         """Attach a runtime event callback used by Web streaming."""
         self.event_callback = callback
 
@@ -66,11 +66,11 @@ class AgentScheduler:
         except Exception:
             pass
 
-    def register_agent(self, agent_name: str, agent: Any):
+    def register_agent(self, agent_name: str, agent: Any) -> None:
         self.agent_registry[agent_name] = agent
         logger.info("Registered agent: %s", agent_name)
 
-    def unregister_agent(self, agent_name: str):
+    def unregister_agent(self, agent_name: str) -> None:
         if agent_name in self.agent_registry:
             del self.agent_registry[agent_name]
             logger.info("Unregistered agent: %s", agent_name)
@@ -167,14 +167,14 @@ class AgentScheduler:
     def get_blocking_reason(self, state: OrchestrationState) -> Optional[str]:
         return self._get_blocking_reason(state)
 
-    def handle_blocking_reason(self, reason: str, state: OrchestrationState):
+    def handle_blocking_reason(self, reason: str, state: OrchestrationState) -> None:
         self._handle_blocking_reason(reason, state)
 
-    def truncate_remaining_batches(self, state: OrchestrationState):
+    def truncate_remaining_batches(self, state: OrchestrationState) -> None:
         batches = state.get("batches", [])
         state["batches"] = batches[: state.get("batch_index", 0)]
 
-    def apply_memory_results(self, results: List[Dict[str, Any]]):
+    def apply_memory_results(self, results: List[Dict[str, Any]]) -> None:
         if self.memory_manager and hasattr(self.memory_manager, "apply_agent_results"):
             self.memory_manager.apply_agent_results(
                 results,
