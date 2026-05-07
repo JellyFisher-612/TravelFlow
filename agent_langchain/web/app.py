@@ -214,7 +214,7 @@ def _render_history_content(raw_msg: dict) -> str:
 
 
 async def _get_or_create_session(user_id: str, session_id: str | None) -> tuple[str, SessionState]:
-    current_session_id = session_id or str(uuid.uuid4())[:8]
+    current_session_id = session_id or str(uuid.uuid4())
 
     if current_session_id in _sessions:
         return current_session_id, _sessions[current_session_id]
