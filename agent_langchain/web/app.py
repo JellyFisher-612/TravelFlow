@@ -143,6 +143,7 @@ class DeleteSessionResponse(BaseModel):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     setup_langsmith_tracing()
+    app.state.long_term_memory = LongTermMemory(user_id="default_user", storage_path="data/memory")
     yield
 
 
@@ -266,7 +267,11 @@ def _render_history_content(raw_msg: dict) -> str:
     return content
 
 
-async def _get_or_create_session(user_id: str, session_id: str | None) -> tuple[str, SessionState]:
+async def _get_or_create_session(
+    user_id: str,
+    session_id: str | None,
+    long_term_memory: LongTermMemory | None = None,
+) -> tuple[str, SessionState]:
     current_session_id = session_id or str(uuid.uuid4())
 
     if current_session_id in _sessions:
@@ -274,6 +279,8 @@ async def _get_or_create_session(user_id: str, session_id: str | None) -> tuple[
 
     cli = TravelFlowCLI()
     await cli.initialize_system(user_id=user_id, interactive=False, session_id=current_session_id)
+    if long_term_memory is not None:
+        cli.memory_manager.long_term = long_term_memory
     state = SessionState(cli, user_id=user_id, session_id=current_session_id)
     _sessions[current_session_id] = state
 
@@ -304,13 +311,14 @@ async def index() -> str:
     tags=["chat"],
     summary="Run one chat turn and return a complete JSON response",
 )
-async def chat(req: ChatRequest) -> ChatResponse:
+async def chat(req: ChatRequest, request: Request) -> ChatResponse:
     try:
         text = req.message.strip()
         if not text:
             raise HTTPException(status_code=400, detail="message 不能为空")
 
-        session_id, state = await _get_or_create_session(req.user_id, req.session_id)
+        long_term_memory = request.app.state.long_term_memory
+        session_id, state = await _get_or_create_session(req.user_id, req.session_id, long_term_memory)
 
         async with state.lock:
             started = time.time()
@@ -340,7 +348,7 @@ async def chat(req: ChatRequest) -> ChatResponse:
     summary="Run one chat turn and stream events with SSE",
     responses={200: SSE_EVENT_SCHEMA},
 )
-async def chat_stream(req: ChatRequest) -> StreamingResponse:
+async def chat_stream(req: ChatRequest, request: Request) -> StreamingResponse:
     text = req.message.strip()
     if not text:
         raise HTTPException(status_code=400, detail="message 不能为空")
@@ -365,7 +373,11 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                 if not session_id:
                     queue.put_nowait({"type": "trace", "message": "正在创建新会话..."})
 
-                session_id, state = await _get_or_create_session(req.user_id, req.session_id)
+                session_id, state = await _get_or_create_session(
+                    req.user_id,
+                    req.session_id,
+                    request.app.state.long_term_memory,
+                )
 
                 async with state.lock:
                     state.cli.set_runtime_event_callback(on_runtime_event)
@@ -432,9 +444,9 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
     tags=["sessions"],
     summary="List persisted chat-log sessions for a user",
 )
-async def list_sessions(user_id: str = "default_user") -> list[SessionListItem]:
+async def list_sessions(request: Request, user_id: str = "default_user") -> list[SessionListItem]:
     try:
-        memory = LongTermMemory(user_id=user_id, storage_path="data/memory")
+        memory = request.app.state.long_term_memory
         chat_history = memory.get_chat_history(limit=None)
         session_meta = memory.get_session_meta_map()
 
@@ -482,9 +494,13 @@ async def list_sessions(user_id: str = "default_user") -> list[SessionListItem]:
     tags=["sessions"],
     summary="Get rendered messages for one chat-log session",
 )
-async def get_session_detail(session_id: str, user_id: str = "default_user") -> SessionDetail:
+async def get_session_detail(
+    session_id: str,
+    request: Request,
+    user_id: str = "default_user",
+) -> SessionDetail:
     try:
-        memory = LongTermMemory(user_id=user_id, storage_path="data/memory")
+        memory = request.app.state.long_term_memory
         messages = memory.get_chat_history(limit=None, session_id=session_id)
         session_meta = memory.get_session_meta_map()
         meta = session_meta.get(session_id, {}) if isinstance(session_meta, dict) else {}
@@ -524,9 +540,13 @@ async def get_session_detail(session_id: str, user_id: str = "default_user") -> 
     tags=["sessions"],
     summary="Delete one persisted chat-log session",
 )
-async def delete_session(session_id: str, user_id: str = "default_user") -> DeleteSessionResponse:
+async def delete_session(
+    session_id: str,
+    request: Request,
+    user_id: str = "default_user",
+) -> DeleteSessionResponse:
     try:
-        memory = LongTermMemory(user_id=user_id, storage_path="data/memory")
+        memory = request.app.state.long_term_memory
         deleted_count = memory.delete_session(session_id)
         if deleted_count <= 0:
             raise HTTPException(status_code=404, detail="会话不存在")
