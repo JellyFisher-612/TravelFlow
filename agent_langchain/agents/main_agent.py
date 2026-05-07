@@ -253,7 +253,7 @@ class MainAgent:
             )
             return await extractor.run(state)
         except Exception as e:
-            logger.error("MainAgent preference extraction failed: %s", e)
+            logger.warning("MainAgent preference extraction failed: %s", e, exc_info=True)
             return {"has_preferences": False, "preferences": [], "error": str(e)}
 
     def _query_memory_direct(self, query: str, context: Dict[str, Any]) -> Dict[str, Any]:

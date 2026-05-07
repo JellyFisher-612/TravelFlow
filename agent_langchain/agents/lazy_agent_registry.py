@@ -8,9 +8,12 @@ import sys
 import importlib
 import importlib.util
 import inspect
+import logging
 from pathlib import Path
 from typing import Dict, Any, Optional, Callable
 from rich.console import Console
+
+logger = logging.getLogger(__name__)
 
 class LazyAgentRegistry:
     """
@@ -115,8 +118,7 @@ class LazyAgentRegistry:
             try:
                 self.event_callback(message)
             except Exception:
-                # 不影响主流程
-                pass
+                logger.debug("LazyAgentRegistry event callback failed", exc_info=True)
 
     def __getitem__(self, agent_name: str):
         """获取智能体 (懒加载)"""
@@ -154,8 +156,7 @@ class LazyAgentRegistry:
             err_msg = f"✗ 加载 {agent_name} 失败: {e}"
             self.console.print(f"[red]{err_msg}[/red]")
             self._emit_event(err_msg)
-            import traceback
-            traceback.print_exc()
+            logger.warning("Failed to load agent %s", agent_name, exc_info=True)
             raise
 
     def _load_agent_class(self, skill_name: str):

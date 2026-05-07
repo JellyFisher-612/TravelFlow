@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import asyncio
 from typing import Any, Optional
@@ -10,6 +11,8 @@ from typing import Any, Optional
 from config import RESILIENCE_CONFIG
 from utils.circuit_breaker import CircuitOpenError
 from utils.llm_resilience import retry_with_backoff
+
+logger = logging.getLogger(__name__)
 
 
 class QueryOrchestrator:
@@ -75,6 +78,7 @@ class QueryOrchestrator:
         except Exception:
             if rt.circuit_breaker:
                 rt.circuit_breaker.record_failure()
+            logger.warning("MainAgent orchestration failed", exc_info=True)
             raise
 
         result_data = main_result.get("final_result") or {"error": "解析结果失败"}
@@ -82,6 +86,7 @@ class QueryOrchestrator:
         try:
             assistant_display = rt.render_result_text(result_data)
         except Exception:
+            logger.debug("Failed to render assistant display text", exc_info=True)
             assistant_display = ""
         rt.memory_manager.add_message(
             "assistant",
@@ -93,7 +98,7 @@ class QueryOrchestrator:
                 try:
                     await rt.memory_manager.summarize_current_session_async()
                 except Exception:
-                    pass
+                    logger.debug("Failed to summarize current session asynchronously", exc_info=True)
 
             asyncio.create_task(_summarize_session_log())
         rt._emit_runtime_event("✅ 结果已生成")

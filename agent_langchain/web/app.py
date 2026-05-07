@@ -3,6 +3,7 @@
 """Web 交互入口：提供浏览器聊天界面与 API。"""
 import asyncio
 import json
+import logging
 import time
 import uuid
 from datetime import datetime
@@ -23,6 +24,7 @@ from utils.langsmith_setup import setup_langsmith_tracing
 BASE_DIR = Path(__file__).resolve().parent
 TEMPLATE_DIR = BASE_DIR / "templates"
 MAX_CHAT_MESSAGE_CHARS = int(SYSTEM_CONFIG.get("max_chat_message_chars", 12000))
+logger = logging.getLogger(__name__)
 
 OPENAPI_TAGS = [
     {"name": "ui", "description": "Browser UI entrypoint."},
@@ -171,8 +173,7 @@ def _hydrate_short_term_memory(state: SessionState):
 
             short_term.add_message(role, content, metadata)
     except Exception:
-        # 回填失败不阻塞主流程
-        pass
+        logger.debug("Failed to hydrate short-term memory from persisted session history", exc_info=True)
 
 
 def _get_or_create_metadata(memory: LongTermMemory, session_id: str, user_id: str) -> dict:
@@ -209,7 +210,7 @@ def _render_history_content(raw_msg: dict) -> str:
                     if isinstance(data.get(key), str) and data.get(key).strip():
                         return data.get(key).strip()
         except Exception:
-            pass
+            logger.debug("Failed to parse assistant history content as JSON", exc_info=True)
     return content
 
 
@@ -291,7 +292,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                 else:
                     queue.put_nowait({"type": "trace", "message": str(message)})
             except Exception:
-                pass
+                logger.debug("Failed to enqueue runtime event for stream response", exc_info=True)
 
         async def run_query():
             session_id = req.session_id
@@ -332,6 +333,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                     "latency_ms": latency_ms,
                 })
             except Exception as e:
+                logger.warning("Streaming chat query failed: %s", e, exc_info=True)
                 queue.put_nowait({"type": "error", "message": str(e)})
             finally:
                 if state:

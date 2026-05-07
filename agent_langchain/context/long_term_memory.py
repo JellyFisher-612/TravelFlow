@@ -60,7 +60,7 @@ class LongTermMemory:
             client.ping()
             self._redis = client
         except Exception as e:
-            logger.warning("Redis unavailable for long-term cache: %s", e)
+            logger.warning("Redis unavailable for long-term cache: %s", e, exc_info=True)
             self._redis = None
 
     def _init_postgres(self):
@@ -76,7 +76,7 @@ class LongTermMemory:
             self._pg = conn
             self._ensure_schema()
         except Exception as e:
-            logger.warning("PostgreSQL unavailable: %s", e)
+            logger.warning("PostgreSQL unavailable: %s", e, exc_info=True)
             self._pg = None
 
     def _ensure_schema(self):
@@ -167,6 +167,7 @@ class LongTermMemory:
         try:
             return datetime.fromisoformat(str(value).replace("Z", "+00:00")).replace(tzinfo=None)
         except Exception:
+            logger.debug("Failed to parse stored timestamp: %r", value, exc_info=True)
             return None
 
     def _prune_json_chat_history(self, save: bool = False):
@@ -244,7 +245,7 @@ class LongTermMemory:
                 meta.setdefault("summary_message_count", 0)
             return data
         except Exception as e:
-            logger.error("Failed to load JSON fallback data: %s", e)
+            logger.error("Failed to load JSON fallback data: %s", e, exc_info=True)
             return self._init_json_data()
 
     def _save_json(self):
@@ -255,7 +256,7 @@ class LongTermMemory:
             with open(self.db_path, "w", encoding="utf-8") as f:
                 json.dump(self._json_data, f, ensure_ascii=False, indent=2)
         except Exception as e:
-            logger.error("Failed to save JSON fallback data: %s", e)
+            logger.error("Failed to save JSON fallback data: %s", e, exc_info=True)
 
     # ------------------------- cache helpers -------------------------
 
@@ -277,6 +278,7 @@ class LongTermMemory:
                 return None
             return json.loads(raw)
         except Exception:
+            logger.debug("Failed to read Redis JSON cache for key=%s", key, exc_info=True)
             return None
 
     def _cache_set_json(self, key: str, value: Dict[str, Any]):
@@ -285,7 +287,7 @@ class LongTermMemory:
         try:
             self._redis.setex(key, self._cache_ttl, json.dumps(value, ensure_ascii=False))
         except Exception:
-            pass
+            logger.debug("Failed to write Redis JSON cache for key=%s", key, exc_info=True)
 
     def _cache_delete(self, key: str):
         if not self._redis:
@@ -293,7 +295,7 @@ class LongTermMemory:
         try:
             self._redis.delete(key)
         except Exception:
-            pass
+            logger.debug("Failed to delete Redis cache key=%s", key, exc_info=True)
 
     # ------------------------- preference -------------------------
 
