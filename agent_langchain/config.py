@@ -67,8 +67,16 @@ SYSTEM_CONFIG = {
     "log_level": "INFO",
     "max_retries": 3,
     "timeout": 60,  # Increased timeout for better stability
+    # Web chat request validation limit, in characters.
     "max_chat_message_chars": int(os.getenv("MAX_CHAT_MESSAGE_CHARS", "12000")),
+    "session_idle_timeout_sec": int(os.getenv("SESSION_IDLE_TIMEOUT_SEC", "300")),
+    "memory_summary_truncate_chars": int(os.getenv("MEMORY_SUMMARY_TRUNCATE_CHARS", "300")),
+    "session_title_max_chars": int(os.getenv("SESSION_TITLE_MAX_CHARS", "60")),
 }
+
+# Web server bind configuration used by web.app:main().
+WEB_HOST = os.getenv("WEB_HOST", "127.0.0.1")
+WEB_PORT = int(os.getenv("WEB_PORT", "8000"))
 
 # 高德地图 API 配置（用于 POI/天气等查询）
 AMAP_CONFIG = {

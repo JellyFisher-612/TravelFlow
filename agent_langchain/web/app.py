@@ -17,13 +17,15 @@ from pydantic import BaseModel, Field
 from starlette.middleware.cors import CORSMiddleware
 
 from cli import TravelFlowCLI
-from config import SYSTEM_CONFIG
+from config import SYSTEM_CONFIG, WEB_HOST, WEB_PORT
 from context.long_term_memory import LongTermMemory
 from utils.langsmith_setup import setup_langsmith_tracing
 
 BASE_DIR = Path(__file__).resolve().parent
 TEMPLATE_DIR = BASE_DIR / "templates"
-MAX_CHAT_MESSAGE_CHARS = int(SYSTEM_CONFIG.get("max_chat_message_chars", 12000))
+MAX_CHAT_MESSAGE_CHARS = int(SYSTEM_CONFIG["max_chat_message_chars"])
+SESSION_IDLE_TIMEOUT_SEC = int(SYSTEM_CONFIG["session_idle_timeout_sec"])
+SESSION_TITLE_MAX_CHARS = int(SYSTEM_CONFIG["session_title_max_chars"])
 logger = logging.getLogger(__name__)
 
 OPENAPI_TAGS = [
@@ -206,7 +208,7 @@ def _get_or_create_metadata(memory: LongTermMemory, session_id: str, user_id: st
 
 
 def _update_session_meta(memory: LongTermMemory, session_id: str, user_id: str, preview: str = ""):
-    memory.update_session_meta(session_id=session_id, preview=preview)
+    memory.update_session_meta(session_id=session_id, preview=preview[:SESSION_TITLE_MAX_CHARS])
 
 
 def _render_history_content(raw_msg: dict) -> str:
@@ -414,7 +416,7 @@ async def list_sessions(user_id: str = "default_user") -> list[SessionListItem]:
             if not preview:
                 for m in messages:
                     if m.get("role") == "user" and m.get("content"):
-                        preview = str(m.get("content"))[:80]
+                        preview = str(m.get("content"))[:SESSION_TITLE_MAX_CHARS]
                         break
             created_at = meta.get("created_at") or (messages[0].get("timestamp") if messages else datetime.now().isoformat())
             last_active = meta.get("last_active") or (messages[-1].get("timestamp") if messages else created_at)
@@ -507,7 +509,7 @@ async def delete_session(session_id: str, user_id: str = "default_user") -> Dele
 def main() -> None:
     import uvicorn
 
-    uvicorn.run("web.app:app", host="127.0.0.1", port=8000, reload=False)
+    uvicorn.run("web.app:app", host=WEB_HOST, port=WEB_PORT, reload=False)
 
 
 if __name__ == "__main__":

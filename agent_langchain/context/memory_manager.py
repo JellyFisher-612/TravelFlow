@@ -5,11 +5,13 @@
 from typing import Dict, Any, List, Optional
 from .short_term_memory import ShortTermMemory
 from .long_term_memory import LongTermMemory
+from config import SYSTEM_CONFIG
 from utils.langchain_runtime import ainvoke_text
 import logging
 import json
 
 logger = logging.getLogger(__name__)
+MEMORY_SUMMARY_TRUNCATE_CHARS = int(SYSTEM_CONFIG["memory_summary_truncate_chars"])
 
 
 class MemoryManager:
@@ -406,7 +408,7 @@ class MemoryManager:
                 content = str(metadata.get("display"))
             content = content.strip()
             if content:
-                lines.append(f"{role}: {content[:300]}")
+                lines.append(f"{role}: {content[:MEMORY_SUMMARY_TRUNCATE_CHARS]}")
         return "；".join(lines[-10:])
 
     def _should_consult_chat_logs(self, query: str, trip_history: Any) -> bool:
