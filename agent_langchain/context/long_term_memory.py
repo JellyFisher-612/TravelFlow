@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 
 
 class LongTermMemory:
+    """Persistent memory store for preferences, chat logs, trip history, and session metadata."""
+
     def __init__(self, user_id: str, storage_path: str = "data/memory") -> None:
         self.user_id = user_id
         self.storage_path = storage_path
@@ -306,6 +308,7 @@ class LongTermMemory:
         metadata: Dict[str, Any] = None,
         action: str = "replace",
     ) -> None:
+        """Persist or update one structured user preference with source metadata."""
         metadata = metadata or {}
         existing_record = self.get_preference_record(pref_type)
         record = self._build_preference_record(
@@ -344,6 +347,7 @@ class LongTermMemory:
         self._save_json()
 
     def get_preference(self, pref_type: str = None) -> Any:
+        """Return one active preference by type, or all active preferences when no type is given."""
         if self._pg:
             cache = self._cache_get_json(self._pref_cache_key())
             if cache is None:
@@ -527,6 +531,7 @@ class LongTermMemory:
         session_id: str = None,
         metadata: Dict[str, Any] = None,
     ) -> None:
+        """Append a persisted chat message for later session recovery and browsing."""
         metadata = metadata or {}
         now = datetime.now().isoformat()
         if self._pg:
@@ -595,6 +600,7 @@ class LongTermMemory:
     # ------------------------- trip history -------------------------
 
     def save_trip_history(self, trip_info: Dict[str, Any]) -> None:
+        """Store a completed trip record so future planning can reference travel history."""
         trip_id = f"trip_{int(datetime.now().timestamp() * 1000)}"
         payload = {"trip_id": trip_id, "timestamp": datetime.now().isoformat(), **trip_info}
 

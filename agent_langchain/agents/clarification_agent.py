@@ -28,6 +28,8 @@ ConfigDict = getattr(_pydantic, "ConfigDict")
 
 
 class EventCollectionOutput(BaseModel):
+    """Structured extraction of trip facts and missing fields for clarification."""
+
     model_config = ConfigDict(extra="allow")
 
     origin: Optional[str] = Field(default=None)

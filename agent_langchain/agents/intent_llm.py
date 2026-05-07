@@ -20,6 +20,8 @@ logger = logging.getLogger(__name__)
 
 
 class IntentItem(BaseModel):
+    """One recognized user intent with confidence and rationale."""
+
     type: str = Field(default="search", description="意图类型")
     confidence: float = Field(default=0.5, description="置信度，0-1")
     description: str = Field(default="", description="意图说明")
@@ -27,6 +29,8 @@ class IntentItem(BaseModel):
 
 
 class AgentScheduleItem(BaseModel):
+    """One business-agent task produced by intent recognition."""
+
     agent_name: str = Field(default="search", description="子智能体名称")
     priority: int = Field(default=1, description="优先级")
     reason: str = Field(default="默认查询", description="调用原因")
@@ -34,6 +38,8 @@ class AgentScheduleItem(BaseModel):
 
 
 class IntentionOutput(BaseModel):
+    """Normalized intent-recognition result that drives MainAgent dispatch."""
+
     reasoning: str = Field(default="", description="推理过程")
     intents: List[IntentItem] = Field(default_factory=list)
     key_entities: Dict[str, Any] = Field(default_factory=dict)

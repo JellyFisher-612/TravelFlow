@@ -57,6 +57,8 @@ SSE_EVENT_SCHEMA = {
 
 
 class ChatRequest(BaseModel):
+    """Incoming chat payload for a single TravelFlow turn."""
+
     message: str = Field(
         ...,
         min_length=1,
@@ -68,6 +70,8 @@ class ChatRequest(BaseModel):
 
 
 class ChatResponse(BaseModel):
+    """Complete non-streaming chat reply with session identity and trace."""
+
     session_id: str
     user_id: str
     reply: str
@@ -76,6 +80,8 @@ class ChatResponse(BaseModel):
 
 
 class SessionState:
+    """In-memory runtime state for one active Web session."""
+
     def __init__(self, cli: TravelFlowCLI, user_id: str, session_id: str):
         self.cli = cli
         self.user_id = user_id
@@ -87,6 +93,8 @@ class SessionState:
 
 
 class SessionListItem(BaseModel):
+    """Compact session summary used by the session list endpoint."""
+
     session_id: str
     user_id: str
     created_at: str
@@ -96,12 +104,16 @@ class SessionListItem(BaseModel):
 
 
 class SessionMessage(BaseModel):
+    """Rendered chat message returned when browsing a persisted session."""
+
     role: str
     content: str
     timestamp: str | None = None
 
 
 class SessionDetail(BaseModel):
+    """Full persisted session view including rendered messages."""
+
     session_id: str
     user_id: str
     created_at: str
@@ -110,6 +122,8 @@ class SessionDetail(BaseModel):
 
 
 class DeleteSessionResponse(BaseModel):
+    """Deletion result for one persisted chat-log session."""
+
     ok: bool
     session_id: str
 

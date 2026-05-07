@@ -28,6 +28,8 @@ ConfigDict = getattr(_pydantic, "ConfigDict")
 
 
 class PreferenceItem(BaseModel):
+    """One extracted long-term user preference and how it should update memory."""
+
     model_config = ConfigDict(extra="allow")
 
     type: str = Field(default="other")
@@ -36,6 +38,8 @@ class PreferenceItem(BaseModel):
 
 
 class PreferenceOutput(BaseModel):
+    """LLM-normalized preference extraction result for memory updates."""
+
     model_config = ConfigDict(extra="allow")
 
     has_preferences: bool = Field(default=False)
